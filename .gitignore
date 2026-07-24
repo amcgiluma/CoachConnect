@@ -7,4 +7,7 @@ __pycache__
 .pytest_cache
 .venv
 .playwright-mcp
+test-results
+playwright-report
+blob-report
 coachconnect-*.png

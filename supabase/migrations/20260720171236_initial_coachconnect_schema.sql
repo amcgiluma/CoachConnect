@@ -103,3 +103,4 @@ create policy "active services public read" on public.coach_services for select 
 create policy "coach services own write" on public.coach_services for all using (auth.uid() = coach_id) with check (auth.uid() = coach_id);
 create policy "bookings participants read" on public.bookings for select using (auth.uid() = consumer_id or auth.uid() = coach_id);
 create policy "reviews public read" on public.reviews for select using (published = true);
+;
