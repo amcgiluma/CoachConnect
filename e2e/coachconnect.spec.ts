@@ -27,3 +27,16 @@ test('cambia el idioma principal y abre autenticación', async ({ page }) => {
   await page.getByRole('button', { name: /log in/i }).click()
   await expect(page.getByRole('button', { name: /continue with apple/i })).toBeVisible()
 })
+
+test('mantiene la home en un viewport y previsualiza con teclado', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'chromium', 'La regla sin scroll solo aplica a escritorio')
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.reload()
+
+  const pageFitsViewport = await page.evaluate(() => document.documentElement.scrollHeight <= window.innerHeight + 1)
+  expect(pageFitsViewport).toBe(true)
+
+  const martial = page.getByRole('button', { name: /artes marciales/i })
+  await martial.focus()
+  await expect(page.getByRole('heading', { level: 2, name: /artes marciales/i })).toBeVisible()
+})

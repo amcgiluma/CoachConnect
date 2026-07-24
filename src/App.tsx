@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useState, type FormEvent } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { Toaster, toast } from 'sonner'
@@ -9,6 +9,7 @@ import {
 } from 'lucide-react'
 import { AuthProvider, useAuth } from './auth'
 import { AuthModal } from './components/AuthModal'
+import { HomeMatchStage } from './components/HomeMatchStage'
 import { Button } from './components/ui/button'
 import { api, ApiError } from './lib/api'
 import { hasSupabase, supabase } from './lib/supabase'
@@ -42,7 +43,9 @@ function App() {
 
 function CoachConnect() {
   const [authOpen, setAuthOpen] = useState(false)
-  return <div className="app-shell">
+  const location = useLocation()
+  const isHomeRoute = location.pathname === '/'
+  return <div className={`app-shell ${isHomeRoute ? 'home-route' : ''}`}>
     <Header onAuth={() => setAuthOpen(true)} />
     <main>
       <Routes>
@@ -58,7 +61,7 @@ function CoachConnect() {
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </main>
-    <Footer />
+    {!isHomeRoute && <Footer />}
     {authOpen && <AuthModal onClose={() => setAuthOpen(false)} />}
     <Toaster position="bottom-center" richColors closeButton />
   </div>
@@ -87,12 +90,28 @@ function Home() {
   const { t } = useTranslation()
   const [step, setStep] = useState(0)
   const [category, setCategory] = useState<Category | null>(null)
+  const [previewId, setPreviewId] = useState(categories[0].id)
   const [answers, setAnswers] = useState<Record<string, string>>({})
+  const categorySelectorRef = useRef<HTMLDivElement>(null)
   const begin = (item: Category) => { setCategory(item); setAnswers({ category: item.id }); setStep(1) }
   const answer = (key: string, value: string) => { setAnswers((current) => ({ ...current, [key]: value })); setStep((current) => current + 1) }
   const finish = (priority: string) => {
     const search = new URLSearchParams({ ...answers, priority })
     navigate(`/buscar?${search}`)
+  }
+  const displayCategories = categories.map((item) => ({
+    ...item,
+    label: t(`home.categories.${item.id}.label`, { defaultValue: item.label }),
+    kicker: t(`home.categories.${item.id}.kicker`, { defaultValue: item.kicker }),
+    examples: item.examples.map((example, index) => t(`home.categories.${item.id}.examples.${index}`, { defaultValue: example })),
+  }))
+  const previewIndex = Math.max(0, categories.findIndex((item) => item.id === previewId))
+  const previewCategory = displayCategories[previewIndex]
+  const focusCategorySelector = () => {
+    const selector = categorySelectorRef.current
+    if (!selector) return
+    selector.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'nearest' })
+    selector.querySelector<HTMLButtonElement>('button')?.focus({ preventScroll: true })
   }
   if (step === 0) return <section className="hero-screen" aria-labelledby="home-title">
     <div className="hero-grid" />
@@ -100,12 +119,29 @@ function Home() {
       <p className="eyebrow"><span className="live-dot" /> {t('home.eyebrow')}</p>
       <h1 id="home-title">{t('home.titleBefore')}<br /><em>{t('home.titleAccent')}</em><br />{t('home.titleAfter')}</h1>
       <p className="hero-deck">{t('home.description')}</p>
-      <div className="hero-cta-row"><Button size="lg" onClick={() => document.getElementById('category-selector')?.scrollIntoView({ behavior: 'smooth' })}>{t('home.action')} <ArrowRight /></Button><span className="quiet-note"><ShieldCheck /> {t('home.verified')}</span></div>
+      <div className="hero-cta-row"><Button size="lg" onClick={focusCategorySelector}>{t('home.action')} <ArrowRight /></Button><span className="quiet-note"><ShieldCheck /> {t('home.verified')}</span></div>
     </div>
+    <HomeMatchStage
+      category={previewCategory}
+      categoryIndex={previewIndex}
+      labels={{
+        eyebrow: t('home.stage.eyebrow'),
+        status: t('home.stage.status'),
+        specialty: t('home.stage.specialty'),
+        criteria: t('home.stage.criteria'),
+        goal: t('home.stage.goal'),
+        mode: t('home.stage.mode'),
+        availability: t('home.stage.availability'),
+        ready: t('home.stage.ready'),
+      }}
+    />
     <div className="hero-number" aria-hidden="true">01<span>/04</span></div>
-    <div className="category-dock" id="category-selector">
+    <div className="category-dock" id="category-selector" ref={categorySelectorRef}>
       <div className="dock-heading"><span>01</span><strong>{t('home.question')}</strong><small>{t('home.questionHelp')}</small></div>
-      <div className="category-grid">{categories.map((item) => <button key={item.id} className={`category-tile tile-${item.accent}`} onClick={() => begin(item)}><span className="tile-kicker">{item.kicker}</span><strong>{item.label}</strong><ArrowUpRight /></button>)}</div>
+      <div className="category-grid">{categories.map((item, index) => {
+        const displayItem = displayCategories[index]
+        return <button key={item.id} className={`category-tile tile-${item.accent} ${previewId === item.id ? 'is-previewed' : ''}`} onMouseEnter={() => setPreviewId(item.id)} onFocus={() => setPreviewId(item.id)} onClick={() => begin(item)}><span className="tile-kicker">{displayItem.kicker}</span><strong>{displayItem.label}</strong><ArrowUpRight /></button>
+      })}</div>
     </div>
   </section>
   const steps = [
