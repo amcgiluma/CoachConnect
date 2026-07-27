@@ -1,0 +1,89 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - link "Volver a CoachConnect" [ref=e5] [cursor=pointer]:
+      - /url: /
+      - generic [ref=e8]: CoachConnect
+    - navigation "Navegación principal" [ref=e9]:
+      - button "EN" [ref=e10] [cursor=pointer]
+      - link "¿Eres entrenador?" [ref=e11] [cursor=pointer]:
+        - /url: /profesional
+      - button "Entrar" [ref=e12] [cursor=pointer]
+  - main [ref=e16]:
+    - region [ref=e17]:
+      - generic [ref=e18]:
+        - paragraph [ref=e19]: Entrenadores verificados, cerca o online
+        - heading [level=1] [ref=e21]:
+          - text: Encuentra
+          - emphasis [ref=e22]: tu próximo
+          - text: entrenador.
+        - paragraph [ref=e23]: Elige qué quieres entrenar. Comparamos especialidad, objetivos y disponibilidad para que reserves con el entrenador adecuado, online o presencial.
+        - generic [ref=e25]:
+          - generic [ref=e26]:
+            - generic [ref=e27]: IM
+            - generic [ref=e28]: MS
+            - generic [ref=e29]: LC
+            - generic [ref=e30]: DO
+          - generic [ref=e31]:
+            - strong [ref=e32]: Entrenadores verificados
+            - generic [ref=e36]: Online y presencial, con reserva desde la app
+      - 'complementary "Tu matching de entrenador: Fitness & fuerza" [ref=e37]':
+        - generic [ref=e38]:
+          - generic [ref=e39]: Tu matching de entrenador
+          - strong [ref=e42]: Categoría activa
+        - generic [ref=e47]:
+          - generic [ref=e48]: Especialidad
+          - paragraph [ref=e59]: Construye capacidad
+          - heading "Fitness & fuerza" [level=2] [ref=e60]
+          - generic [ref=e61]:
+            - generic [ref=e62]: Musculación
+            - generic [ref=e63]: Pérdida de peso
+            - generic [ref=e64]: Funcional
+        - generic [ref=e65]:
+          - generic [ref=e66]: Así encontramos tu coach
+          - generic [ref=e69]:
+            - generic [ref=e70]: Especialidad
+            - generic [ref=e74]:
+              - text: "02"
+              - generic [ref=e75]: Objetivo
+            - generic [ref=e76]:
+              - text: "03"
+              - generic [ref=e77]: Modalidad
+            - generic [ref=e78]:
+              - text: "04"
+              - generic [ref=e79]: Horario
+          - generic [ref=e80]:
+            - paragraph [ref=e81]: Listo para afinar tu búsqueda
+            - button "Elegir especialidad" [ref=e83] [cursor=pointer]
+      - generic [ref=e86]: 01/04
+      - region [ref=e87]:
+        - generic [ref=e88]:
+          - generic [ref=e89]: "01"
+          - strong [ref=e90]: ¿Qué quieres entrenar?
+          - generic [ref=e91]: Elige una especialidad para empezar.
+        - region "Categorías de entrenamiento" [ref=e92]:
+          - button "Construye capacidad Fitness & fuerza" [ref=e93] [cursor=pointer]:
+            - generic [ref=e100]: Construye capacidad
+            - strong [ref=e101]: Fitness & fuerza
+          - button "Aprende a moverte Artes marciales" [ref=e105] [cursor=pointer]:
+            - generic [ref=e115]: Aprende a moverte
+            - strong [ref=e116]: Artes marciales
+          - button "Ve más lejos Running & resistencia" [ref=e120] [cursor=pointer]:
+            - generic [ref=e125]: Ve más lejos
+            - strong [ref=e126]: Running & resistencia
+          - button "Muévete mejor Movilidad & cuerpo" [ref=e130] [cursor=pointer]:
+            - generic [ref=e135]: Muévete mejor
+            - strong [ref=e136]: Movilidad & cuerpo
+          - button "Compite preparado Preparación deportiva" [ref=e140] [cursor=pointer]:
+            - generic [ref=e147]: Compite preparado
+            - strong [ref=e148]: Preparación deportiva
+          - button "Encuentra tu ritmo Danza & movimiento" [ref=e152] [cursor=pointer]:
+            - generic [ref=e156]: Encuentra tu ritmo
+            - strong [ref=e157]: Danza & movimiento
+          - button "Sal fuera Entrenamiento exterior" [ref=e161] [cursor=pointer]:
+            - generic [ref=e165]: Sal fuera
+            - strong [ref=e166]: Entrenamiento exterior
+          - button "Sostén el hábito Bienestar aplicado" [ref=e170] [cursor=pointer]:
+            - generic [ref=e173]: Sostén el hábito
+            - strong [ref=e174]: Bienestar aplicado
+        - generic [ref=e178]: "Categoría activa: Fitness & fuerza"
+  - region "Notifications alt+T"

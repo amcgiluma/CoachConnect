@@ -32,6 +32,7 @@ class MatchRequest(BaseModel):
 class CoachSummary(BaseModel):
     id: str
     name: str
+    avatar_url: str | None = None
     specialty: str
     category: str
     mode: ServiceMode

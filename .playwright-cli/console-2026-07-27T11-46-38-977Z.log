@@ -1,0 +1,38 @@
+[     534ms] [INFO] %cDownload the React DevTools for a better development experience: https://reactjs.org/link/react-devtools font-weight:bold @ http://localhost:5173/node_modules/.vite/deps/react-dom-DZQ9hRBr.js?v=db34ca8a:17230
+[ 3622572ms] [ERROR] Warning: React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from a parent component, remove it from the DOM element.%s fetchPriority fetchpriority 
+    at img
+    at picture
+    at div
+    at div
+    at aside
+    at HomeMatchStage (http://localhost:5173/src/components/HomeMatchStage.tsx?t=1785156421497:15:34)
+    at section
+    at Home (http://localhost:5173/src/App.tsx?t=1785156396095:400:19)
+    at RenderedRoute (http://localhost:5173/node_modules/.vite/deps/react-router-dom.js?v=45842dc6:4142:26)
+    at Routes (http://localhost:5173/node_modules/.vite/deps/react-router-dom.js?v=45842dc6:4822:19)
+    at main
+    at div
+    at CoachConnect (http://localhost:5173/src/App.tsx?t=1785156396095:71:34)
+    at Router (http://localhost:5173/node_modules/.vite/deps/react-router-dom.js?v=45842dc6:4774:29)
+    at BrowserRouter (http://localhost:5173/node_modules/.vite/deps/react-router-dom.js?v=45842dc6:7216:26)
+    at AuthProvider (http://localhost:5173/src/auth.tsx:8:32)
+    at App @ http://localhost:5173/node_modules/.vite/deps/react-dom-DZQ9hRBr.js?v=db34ca8a:442
+[ 3686661ms] [INFO] %cDownload the React DevTools for a better development experience: https://reactjs.org/link/react-devtools font-weight:bold @ http://localhost:5173/node_modules/.vite/deps/react-dom-DZQ9hRBr.js?v=db34ca8a:17230
+[ 3686692ms] [ERROR] Warning: React does not recognize the `%s` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `%s` instead. If you accidentally passed it from a parent component, remove it from the DOM element.%s fetchPriority fetchpriority 
+    at img
+    at picture
+    at div
+    at div
+    at aside
+    at HomeMatchStage (http://localhost:5173/src/components/HomeMatchStage.tsx?t=1785156421497:15:34)
+    at section
+    at Home (http://localhost:5173/src/App.tsx?t=1785156485223:402:19)
+    at RenderedRoute (http://localhost:5173/node_modules/.vite/deps/react-router-dom.js?v=45842dc6:4142:26)
+    at Routes (http://localhost:5173/node_modules/.vite/deps/react-router-dom.js?v=45842dc6:4822:19)
+    at main
+    at div
+    at CoachConnect (http://localhost:5173/src/App.tsx?t=1785156485223:73:34)
+    at Router (http://localhost:5173/node_modules/.vite/deps/react-router-dom.js?v=45842dc6:4774:29)
+    at BrowserRouter (http://localhost:5173/node_modules/.vite/deps/react-router-dom.js?v=45842dc6:7216:26)
+    at AuthProvider (http://localhost:5173/src/auth.tsx:8:32)
+    at App @ http://localhost:5173/node_modules/.vite/deps/react-dom-DZQ9hRBr.js?v=db34ca8a:442

@@ -1,12 +1,16 @@
 import type { CSSProperties } from 'react'
-import { ArrowUpRight, Check, Crosshair, SlidersHorizontal } from 'lucide-react'
+import { ArrowDown, ArrowUpRight, Check, Crosshair, SlidersHorizontal, type LucideIcon } from 'lucide-react'
 import type { Category } from '../data'
+import { getCategoryVisual } from '../lib/media'
 
 type MatchStageCategory = Pick<Category, 'id' | 'label' | 'kicker' | 'examples' | 'accent'>
 
 type HomeMatchStageProps = {
   category: MatchStageCategory
   categoryIndex: number
+  categoryCount: number
+  categoryIcon: LucideIcon
+  onGuide: () => void
   labels: {
     eyebrow: string
     status: string
@@ -16,6 +20,7 @@ type HomeMatchStageProps = {
     mode: string
     availability: string
     ready: string
+    action: string
   }
 }
 
@@ -30,10 +35,18 @@ const accentColors: Record<string, string> = {
   sand: '#dfc6a2',
 }
 
-export function HomeMatchStage({ category, categoryIndex, labels }: HomeMatchStageProps) {
+export function HomeMatchStage({
+  category,
+  categoryIndex,
+  categoryCount,
+  categoryIcon: CategoryIcon,
+  onGuide,
+  labels,
+}: HomeMatchStageProps) {
+  const visual = getCategoryVisual(category.id)
   const style = {
     '--stage-accent': accentColors[category.accent] || accentColors.lime,
-    '--marker-rotation': `${categoryIndex * 45}deg`,
+    '--marker-rotation': `${categoryIndex * (360 / Math.max(1, categoryCount))}deg`,
   } as CSSProperties
 
   return (
@@ -49,8 +62,19 @@ export function HomeMatchStage({ category, categoryIndex, labels }: HomeMatchSta
         <div className="match-marker" aria-hidden="true"><span /></div>
 
         <div className="match-core">
+          <picture className="match-core-photo" key={category.id} aria-hidden="true">
+            <source srcSet={visual.avif} type="image/avif" />
+            <img
+              src={visual.webp}
+              alt=""
+              width="800"
+              height="600"
+              decoding="async"
+              style={{ objectPosition: visual.objectPosition }}
+            />
+          </picture>
           <div className="match-core-heading">
-            <span>{labels.specialty}</span>
+            <span className="match-core-label"><CategoryIcon aria-hidden="true" /> {labels.specialty}</span>
             <ArrowUpRight aria-hidden="true" />
           </div>
           <p>{category.kicker}</p>
@@ -71,7 +95,12 @@ export function HomeMatchStage({ category, categoryIndex, labels }: HomeMatchSta
             </span>
           ))}
         </div>
-        <p><i /> {labels.ready}</p>
+        <div className="match-stage-footer">
+          <p><i /> {labels.ready}</p>
+          <button type="button" className="match-stage-action" onClick={onGuide}>
+            {labels.action} <ArrowDown aria-hidden="true" />
+          </button>
+        </div>
       </footer>
     </aside>
   )

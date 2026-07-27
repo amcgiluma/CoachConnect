@@ -1,0 +1,52 @@
+- generic [ref=f3e3]:
+  - banner [ref=f3e4]:
+    - link "Volver a CoachConnect" [ref=f3e5] [cursor=pointer]:
+      - /url: /
+      - generic [ref=f3e8]: CoachConnect
+    - navigation "Navegación principal" [ref=f3e9]:
+      - button "EN" [ref=f3e10] [cursor=pointer]
+      - link "¿Eres entrenador?" [ref=f3e11] [cursor=pointer]:
+        - /url: /profesional
+      - button "Entrar" [ref=f3e12] [cursor=pointer]
+  - main [ref=f3e16]:
+    - generic [ref=f3e17]:
+      - generic [ref=f3e18]:
+        - link "Cambiar búsqueda" [ref=f3e19] [cursor=pointer]:
+          - /url: /
+        - generic [ref=f3e22]:
+          - generic [ref=f3e23]:
+            - paragraph [ref=f3e24]: Tu búsqueda
+            - heading "Fitness & fuerza que encajan contigo." [level=1] [ref=f3e25]
+          - generic [ref=f3e26]:
+            - strong [ref=f3e27]: "1"
+            - generic [ref=f3e28]: coincidenciasencontradas
+        - generic [ref=f3e29]:
+          - generic [ref=f3e30]: EspecialidadFitness & fuerza
+          - generic [ref=f3e31]: ObjetivoGanar fuerza
+          - generic [ref=f3e32]: ZonaMadrid
+      - generic [ref=f3e33]:
+        - generic [ref=f3e34]:
+          - button "Todos" [ref=f3e35] [cursor=pointer]
+          - button "Online" [ref=f3e36] [cursor=pointer]
+          - button "Presencial" [ref=f3e37] [cursor=pointer]
+        - generic [ref=f3e38]:
+          - generic [ref=f3e39]:
+            - generic [ref=f3e40]: Ordenar
+            - combobox "Ordenar" [ref=f3e41]:
+              - option "Mejor coincidencia" [selected]
+              - option "Disponibilidad"
+              - option "Reputación"
+              - option "Precio"
+          - button "Ver mapa" [ref=f3e42] [cursor=pointer]
+      - generic [ref=f3e46]: Buscando el mejor encaje
+  - contentinfo [ref=f3e52]:
+    - generic [ref=f3e53]: © 2026 CoachConnect
+    - generic [ref=f3e54]:
+      - link "Entrenadores" [ref=f3e55] [cursor=pointer]:
+        - /url: /profesional
+      - link "Administración" [ref=f3e56] [cursor=pointer]:
+        - /url: /admin
+      - button "Privacidad" [ref=f3e57] [cursor=pointer]
+      - button "Ayuda" [ref=f3e58] [cursor=pointer]
+    - generic [ref=f3e59]: Hecho para entrenar, no para hacer scroll.
+  - region "Notifications alt+T"

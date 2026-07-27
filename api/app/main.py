@@ -216,7 +216,7 @@ async def remote_coaches() -> list[CoachSummary]:
     try:
         rows = await db.select(
             "coach_profiles",
-            select="*,profiles(display_name),coach_services(*,categories(slug,name_es))",
+            select="*,profiles(display_name,avatar_url),coach_services(*,categories(slug,name_es))",
             verification_status="in.(credentials_submitted,under_review,verified)",
         )
         result: list[CoachSummary] = []
@@ -229,6 +229,7 @@ async def remote_coaches() -> list[CoachSummary]:
             result.append(CoachSummary(
                 id=row["user_id"],
                 name=(row.get("profiles") or {}).get("display_name", "Entrenador CoachConnect"),
+                avatar_url=(row.get("profiles") or {}).get("avatar_url"),
                 specialty=row["headline"] or primary["name"],
                 category=category.get("slug", "fitness"),
                 mode=row["mode"],

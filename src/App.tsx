@@ -3,13 +3,17 @@ import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate,
 import { useTranslation } from 'react-i18next'
 import { Toaster, toast } from 'sonner'
 import {
-  ArrowLeft, ArrowRight, ArrowUpRight, BadgeCheck, Bell, CalendarDays, Check, ChevronDown, Clock3,
-  CreditCard, FileCheck2, Globe2, LayoutDashboard, LoaderCircle, LogOut, MapPin, MessageCircle,
-  Paperclip, Send, Settings2, ShieldCheck, Sparkles, Star, Upload, UserRound, Video, X, Zap,
+  ArrowLeft, ArrowRight, BadgeCheck, Bell, CalendarDays, Check, ChevronDown, CircleDollarSign,
+  Clock3, CreditCard, Dumbbell, FileCheck2, Globe2, Languages, LayoutDashboard, LoaderCircle,
+  LogOut, MapPin, MessageCircle, Paperclip, Send, Settings2, ShieldCheck, SlidersHorizontal,
+  Sparkles, Star, Target, Trophy, Upload, UserRound, Video, X, Zap, type LucideIcon,
 } from 'lucide-react'
 import { AuthProvider, useAuth } from './auth'
 import { AuthModal } from './components/AuthModal'
+import { CategorySelector } from './components/CategorySelector'
+import { CoachAvatar } from './components/CoachAvatar'
 import { HomeMatchStage } from './components/HomeMatchStage'
+import { getCategoryIcon, getTrainingIcon } from './components/icons/trainingIcons'
 import { Button } from './components/ui/button'
 import { api, ApiError } from './lib/api'
 import { hasSupabase, supabase } from './lib/supabase'
@@ -19,20 +23,26 @@ import './i18n'
 type MatchApiCoach = {
   id: string; name: string; specialty: string; category: string; mode: Mode; city: string; rating: number
   reviews: number; price_from: number; next_slot: string; responds_now: boolean; verified: boolean
-  languages: string[]; match_reasons: string[]
+  languages: string[]; match_reasons: string[]; avatar_url?: string | null
 }
 type MatchApiResponse = { items: MatchApiCoach[]; relaxed_filter: string | null }
 type LocalBooking = { id: string; coachId: string; coachName: string; serviceName: string; startsAt: string; amount: number; status: string }
 type Profile = { id: string; display_name: string; role: 'consumer' | 'coach' | 'admin' }
 type AvailableSlot = { starts_at: string; ends_at: string; label: string }
+type QuestionnaireOption = { label: string; icon: LucideIcon }
+type QuestionnaireStep = { title: string; key: string; options: QuestionnaireOption[] }
 
 const CoachMap = lazy(() => import('./components/CoachMap').then((module) => ({ default: module.CoachMap })))
+
+const toQuestionOptions = (labels: string[], categoryId?: string): QuestionnaireOption[] =>
+  labels.map((label) => ({ label, icon: getTrainingIcon(label, categoryId) }))
 
 const fallbackCoach = (row: MatchApiCoach): Coach => ({
   id: row.id, name: row.name, initials: row.name.split(' ').map((part) => part[0]).join('').slice(0, 2).toUpperCase(),
   specialty: row.specialty, category: row.category, mode: row.mode, city: row.city, rating: row.rating,
   reviews: row.reviews, price: row.price_from, response: row.responds_now ? 'Ahora' : '< 2 h', nextSlot: row.next_slot,
   verified: row.verified, onlineNow: row.responds_now, bio: 'Un enfoque claro, profesional y adaptado a tu objetivo.',
+  avatarUrl: row.avatar_url || undefined,
   tags: [row.specialty, ...(row.languages || []), row.mode === 'presencial' ? 'Presencial' : 'Online'],
   services: [{ name: 'Sesión individual', detail: '60 min', price: row.price_from }], matchReasons: row.match_reasons,
 })
@@ -92,7 +102,7 @@ function Home() {
   const [category, setCategory] = useState<Category | null>(null)
   const [previewId, setPreviewId] = useState(categories[0].id)
   const [answers, setAnswers] = useState<Record<string, string>>({})
-  const categorySelectorRef = useRef<HTMLDivElement>(null)
+  const categorySelectorRef = useRef<HTMLElement>(null)
   const begin = (item: Category) => { setCategory(item); setAnswers({ category: item.id }); setStep(1) }
   const answer = (key: string, value: string) => { setAnswers((current) => ({ ...current, [key]: value })); setStep((current) => current + 1) }
   const finish = (priority: string) => {
@@ -107,11 +117,15 @@ function Home() {
   }))
   const previewIndex = Math.max(0, categories.findIndex((item) => item.id === previewId))
   const previewCategory = displayCategories[previewIndex]
+  const verifiedCoaches = coaches.filter((item) => item.verified)
   const focusCategorySelector = () => {
     const selector = categorySelectorRef.current
     if (!selector) return
-    selector.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'nearest' })
-    selector.querySelector<HTMLButtonElement>('button')?.focus({ preventScroll: true })
+    selector.scrollIntoView({
+      behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+      block: 'center',
+    })
+    selector.querySelector<HTMLButtonElement>(`[data-category-id="${previewId}"]`)?.focus({ preventScroll: true })
   }
   if (step === 0) return <section className="hero-screen" aria-labelledby="home-title">
     <div className="hero-grid" />
@@ -119,11 +133,22 @@ function Home() {
       <p className="eyebrow"><span className="live-dot" /> {t('home.eyebrow')}</p>
       <h1 id="home-title">{t('home.titleBefore')}<br /><em>{t('home.titleAccent')}</em><br />{t('home.titleAfter')}</h1>
       <p className="hero-deck">{t('home.description')}</p>
-      <div className="hero-cta-row"><Button size="lg" onClick={focusCategorySelector}>{t('home.action')} <ArrowRight /></Button><span className="quiet-note"><ShieldCheck /> {t('home.verified')}</span></div>
+      <div className="hero-cta-row">
+        <Button className="hero-selector-cta" size="lg" onClick={focusCategorySelector}>{t('home.action')} <ArrowRight aria-hidden="true" /></Button>
+        {verifiedCoaches.length > 0 && <div className="coach-proof">
+          <span className="coach-proof-avatars">
+            {verifiedCoaches.slice(0, 4).map((coach) => <CoachAvatar coach={coach} className="proof-avatar" key={coach.id} eager title={`${coach.name} · ${coach.specialty}`} />)}
+          </span>
+          <span><strong><ShieldCheck aria-hidden="true" /> {t('home.verified')}</strong><small>{t('home.proofRating')}</small><small>{t('home.proofDetail')}</small></span>
+        </div>}
+      </div>
     </div>
     <HomeMatchStage
       category={previewCategory}
       categoryIndex={previewIndex}
+      categoryCount={displayCategories.length}
+      categoryIcon={getCategoryIcon(previewCategory.id)}
+      onGuide={focusCategorySelector}
       labels={{
         eyebrow: t('home.stage.eyebrow'),
         status: t('home.stage.status'),
@@ -133,37 +158,51 @@ function Home() {
         mode: t('home.stage.mode'),
         availability: t('home.stage.availability'),
         ready: t('home.stage.ready'),
+        action: t('home.stage.action'),
       }}
     />
     <div className="hero-number" aria-hidden="true">01<span>/04</span></div>
-    <div className="category-dock" id="category-selector" ref={categorySelectorRef}>
-      <div className="dock-heading"><span>01</span><strong>{t('home.question')}</strong><small>{t('home.questionHelp')}</small></div>
-      <div className="category-grid">{categories.map((item, index) => {
-        const displayItem = displayCategories[index]
-        return <button key={item.id} className={`category-tile tile-${item.accent} ${previewId === item.id ? 'is-previewed' : ''}`} onMouseEnter={() => setPreviewId(item.id)} onFocus={() => setPreviewId(item.id)} onClick={() => begin(item)}><span className="tile-kicker">{displayItem.kicker}</span><strong>{displayItem.label}</strong><ArrowUpRight /></button>
-      })}</div>
-    </div>
+    <CategorySelector
+      ref={categorySelectorRef}
+      categories={displayCategories}
+      activeCategoryId={previewId}
+      onActiveChange={setPreviewId}
+      onSelect={(item) => begin(categories.find((categoryItem) => categoryItem.id === item.id) || item)}
+      labels={{
+        question: t('home.question'),
+        help: t('home.questionHelp'),
+        previous: t('home.categoriesPrevious'),
+        next: t('home.categoriesNext'),
+        region: t('home.categoriesRegion'),
+        active: t('home.categoryActive'),
+      }}
+    />
   </section>
-  const steps = [
-    { title: '¿Qué disciplina encaja mejor?', key: 'subcategory', options: category?.examples || [] },
-    { title: '¿Qué quieres conseguir?', key: 'goal', options: ['Ganar fuerza', 'Perder peso', 'Moverme mejor', 'Prepararme para competir'] },
-    { title: '¿Cómo quieres entrenar?', key: 'mode', options: ['Online', 'Presencial', 'Me da igual'] },
-    { title: '¿Cuándo te viene bien?', key: 'availability', options: ['Responde ahora', 'Esta semana', 'Flexible'] },
-    { title: '¿Dónde estás?', key: 'city', options: ['Madrid', 'Barcelona', 'Valencia', 'Cualquier sitio si es online'] },
-    { title: '¿Qué presupuesto tienes por sesión?', key: 'budget', options: ['Hasta 25 €', 'Hasta 35 €', 'Hasta 50 €', 'Flexible'] },
-    { title: '¿En qué idioma prefieres entrenar?', key: 'language', options: ['Español', 'Inglés', 'Me da igual'] },
+  const steps: QuestionnaireStep[] = [
+    { title: '¿Qué disciplina encaja mejor?', key: 'subcategory', options: toQuestionOptions(category?.examples || [], category?.id) },
+    { title: '¿Qué quieres conseguir?', key: 'goal', options: [{ label: 'Ganar fuerza', icon: Dumbbell }, { label: 'Perder peso', icon: getTrainingIcon('Perder peso', 'fitness') }, { label: 'Moverme mejor', icon: getTrainingIcon('Movilidad', 'mobility') }, { label: 'Prepararme para competir', icon: Trophy }] },
+    { title: '¿Cómo quieres entrenar?', key: 'mode', options: [{ label: 'Online', icon: Globe2 }, { label: 'Presencial', icon: MapPin }, { label: 'Me da igual', icon: SlidersHorizontal }] },
+    { title: '¿Cuándo te viene bien?', key: 'availability', options: [{ label: 'Responde ahora', icon: Zap }, { label: 'Esta semana', icon: CalendarDays }, { label: 'Flexible', icon: Clock3 }] },
+    { title: '¿Dónde estás?', key: 'city', options: [{ label: 'Madrid', icon: MapPin }, { label: 'Barcelona', icon: MapPin }, { label: 'Valencia', icon: MapPin }, { label: 'Cualquier sitio si es online', icon: Globe2 }] },
+    { title: '¿Qué presupuesto tienes por sesión?', key: 'budget', options: ['Hasta 25 €', 'Hasta 35 €', 'Hasta 50 €', 'Flexible'].map((label) => ({ label, icon: CircleDollarSign })) },
+    { title: '¿En qué idioma prefieres entrenar?', key: 'language', options: ['Español', 'Inglés', 'Me da igual'].map((label) => ({ label, icon: Languages })) },
   ]
   const current = steps[step - 1]
   return <section className="question-screen" aria-labelledby="question-title">
     <div className="question-progress"><span>02 — Afinemos la búsqueda</span><div><i style={{ width: `${Math.min(100, step / (steps.length + 1) * 100)}%` }} /></div><b>{String(step).padStart(2, '0')}<small>/{String(steps.length + 1).padStart(2, '0')}</small></b></div>
     <div className="question-wrap"><button className="back-link" onClick={() => setStep(Math.max(0, step - 1))}><ArrowLeft /> Atrás</button><p className="eyebrow">{category?.label}</p>
-      {current ? <Question title={current.title} options={current.options} onSelect={(value) => answer(current.key, value)} /> : <div className="final-question"><p className="eyebrow">Casi listo</p><h2 id="question-title">¿Qué pesa más para ti?</h2><p className="question-intro">Usaremos tu respuesta para ordenar los resultados, no para encerrarte en un filtro.</p><div className="option-list">{['La mejor coincidencia', 'Que responda ahora', 'La experiencia y las reseñas', 'El precio'].map((option, index) => <button key={option} className="option-card" onClick={() => finish(option)}><span>0{index + 1}</span><strong>{option}</strong><ArrowRight /></button>)}</div></div>}
+      {current ? <Question title={current.title} options={current.options} onSelect={(value) => answer(current.key, value)} /> : <div className="final-question"><p className="eyebrow">Casi listo</p><h2 id="question-title">¿Qué pesa más para ti?</h2><p className="question-intro">Usaremos tu respuesta para ordenar los resultados, no para encerrarte en un filtro.</p><div className="option-list">{([{ label: 'La mejor coincidencia', icon: Target }, { label: 'Que responda ahora', icon: Zap }, { label: 'La experiencia y las reseñas', icon: Star }, { label: 'El precio', icon: CircleDollarSign }] as QuestionnaireOption[]).map((option, index) => <OptionButton key={option.label} option={option} index={index} onSelect={() => finish(option.label)} />)}</div></div>}
     </div>
   </section>
 }
 
-function Question({ title, options, onSelect }: { title: string; options: string[]; onSelect: (value: string) => void }) {
-  return <div className="question-content"><p className="eyebrow">Una respuesta rápida</p><h2 id="question-title">{title}</h2><div className="option-list">{options.map((option, index) => <button key={option} className="option-card" onClick={() => onSelect(option)}><span>0{index + 1}</span><strong>{option}</strong><ArrowRight /></button>)}</div></div>
+function OptionButton({ option, index, onSelect }: { option: QuestionnaireOption; index: number; onSelect: () => void }) {
+  const Icon = option.icon
+  return <button className="option-card" onClick={onSelect}><span className="option-icon" aria-hidden="true"><Icon /></span><span className="option-index" aria-hidden="true">0{index + 1}</span><strong>{option.label}</strong><ArrowRight aria-hidden="true" /></button>
+}
+
+function Question({ title, options, onSelect }: { title: string; options: QuestionnaireOption[]; onSelect: (value: string) => void }) {
+  return <div className="question-content"><p className="eyebrow">Una respuesta rápida</p><h2 id="question-title">{title}</h2><div className="option-list">{options.map((option, index) => <OptionButton key={option.label} option={option} index={index} onSelect={() => onSelect(option.label)} />)}</div></div>
 }
 
 function Results() {
@@ -215,7 +254,7 @@ function Results() {
 }
 
 function CoachCard({ coach, rank, onClick }: { coach: Coach; rank: number; onClick: () => void }) {
-  return <article className="coach-card" onClick={onClick} tabIndex={0} onKeyDown={(event) => event.key === 'Enter' && onClick()}><div className={`avatar avatar-${rank}`}>{coach.initials}</div><div className="coach-main"><div className="coach-card-top"><div><p className="coach-specialty">{coach.specialty}</p><h2>{coach.name}</h2></div><div className="rating"><Star fill="currentColor" /> <strong>{coach.rating}</strong><span>({coach.reviews})</span></div></div><p className="coach-bio">{coach.bio}</p>{coach.matchReasons?.length ? <div className="match-reasons">{coach.matchReasons.slice(0, 3).map((reason) => <span key={reason}><Check /> {reason}</span>)}</div> : null}<div className="coach-meta"><span><MapPin /> {coach.city}</span><span><Clock3 /> {coach.nextSlot}</span><span className={coach.onlineNow ? 'is-live' : ''}><Zap /> {coach.onlineNow ? 'Responde ahora' : coach.response}</span></div><div className="coach-card-bottom"><div className="tag-row">{coach.tags.slice(0, 2).map((tag) => <span key={tag}>{tag}</span>)}</div><strong className="price-from">Desde {coach.price} € <small>/ sesión</small></strong></div></div><ArrowRight className="card-arrow" /></article>
+  return <article className="coach-card" onClick={onClick} tabIndex={0} onKeyDown={(event) => event.key === 'Enter' && onClick()}><CoachAvatar coach={coach} className={`avatar avatar-${rank}`} /><div className="coach-main"><div className="coach-card-top"><div><p className="coach-specialty">{coach.specialty}</p><h2>{coach.name}</h2></div><div className="rating"><Star fill="currentColor" /> <strong>{coach.rating}</strong><span>({coach.reviews})</span></div></div><p className="coach-bio">{coach.bio}</p>{coach.matchReasons?.length ? <div className="match-reasons">{coach.matchReasons.slice(0, 3).map((reason) => <span key={reason}><Check /> {reason}</span>)}</div> : null}<div className="coach-meta"><span><MapPin /> {coach.city}</span><span><Clock3 /> {coach.nextSlot}</span><span className={coach.onlineNow ? 'is-live' : ''}><Zap /> {coach.onlineNow ? 'Responde ahora' : coach.response}</span></div><div className="coach-card-bottom"><div className="tag-row">{coach.tags.slice(0, 2).map((tag) => <span key={tag}>{tag}</span>)}</div><strong className="price-from">Desde {coach.price} € <small>/ sesión</small></strong></div></div><ArrowRight className="card-arrow" /></article>
 }
 
 function CoachProfile({ onAuth }: { onAuth: () => void }) {
@@ -237,7 +276,7 @@ function CoachProfile({ onAuth }: { onAuth: () => void }) {
     if (!isRemoteCoach(coachId)) return
     api<any>(`/api/v1/coaches/${coachId}`).then((row) => {
       const services: CoachService[] = (row.coach_services || []).map((item: any) => ({ id: item.id, name: item.name, detail: `${item.duration_minutes} min · ${item.mode}`, price: item.price_cents / 100, duration: item.duration_minutes, packageSize: item.package_size }))
-      setCoach({ id: row.user_id, name: row.profiles?.display_name || initial?.name || 'Entrenador', initials: (row.profiles?.display_name || 'CC').split(' ').map((p: string) => p[0]).join('').slice(0, 2), specialty: row.headline, category: services[0] ? initial?.category || 'fitness' : 'fitness', mode: row.mode, city: row.city || 'Online', rating: Number(row.rating), reviews: row.review_count, price: Math.min(...services.map((item) => item.price)), response: '< 2 h', nextSlot: 'Consulta la agenda', verified: row.verification_status === 'verified', onlineNow: row.responds_now, bio: row.bio, tags: [row.headline, ...(row.languages || [])], services, videoProvider: row.preferred_video_provider })
+      setCoach({ id: row.user_id, name: row.profiles?.display_name || initial?.name || 'Entrenador', initials: (row.profiles?.display_name || 'CC').split(' ').map((p: string) => p[0]).join('').slice(0, 2), avatarUrl: row.profiles?.avatar_url || initial?.avatarUrl, avatarAvifUrl: initial?.avatarAvifUrl, specialty: row.headline, category: services[0] ? initial?.category || 'fitness' : 'fitness', mode: row.mode, city: row.city || 'Online', rating: Number(row.rating), reviews: row.review_count, price: Math.min(...services.map((item) => item.price)), response: '< 2 h', nextSlot: 'Consulta la agenda', verified: row.verification_status === 'verified', onlineNow: row.responds_now, bio: row.bio, tags: [row.headline, ...(row.languages || [])], services, videoProvider: row.preferred_video_provider })
       if (packageServiceId) {
         const selectedIndex = services.findIndex((item) => item.id === packageServiceId)
         if (selectedIndex >= 0) setService(selectedIndex)
@@ -291,7 +330,7 @@ function CoachProfile({ onAuth }: { onAuth: () => void }) {
     } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo reservar') } finally { setBusy(false) }
   }
   const contact = () => { if (!user) return onAuth(); setChatOpen(true) }
-  return <section className="profile-screen"><Link className="back-link" to="/buscar"><ArrowLeft /> Volver a resultados</Link><div className="profile-hero"><div className="profile-avatar">{coach.initials}</div><div className="profile-title"><div className="profile-title-line"><h1>{coach.name}</h1>{coach.onlineNow && <span className="live-badge">Disponible ahora</span>}</div><p>{coach.specialty} · {coach.city}</p><div className="profile-rating"><Star fill="currentColor" /><strong>{coach.rating}</strong><span>{coach.reviews} reseñas</span>{coach.verified && <span className="verified-copy"><BadgeCheck /> Identidad y título verificados</span>}</div></div></div>
+  return <section className="profile-screen"><Link className="back-link" to="/buscar"><ArrowLeft /> Volver a resultados</Link><div className="profile-hero"><CoachAvatar coach={coach} className="profile-avatar" eager /><div className="profile-title"><div className="profile-title-line"><h1>{coach.name}</h1>{coach.onlineNow && <span className="live-badge">Disponible ahora</span>}</div><p>{coach.specialty} · {coach.city}</p><div className="profile-rating"><Star fill="currentColor" /><strong>{coach.rating}</strong><span>{coach.reviews} reseñas</span>{coach.verified && <span className="verified-copy"><BadgeCheck /> Identidad y título verificados</span>}</div></div></div>
     <div className="profile-grid"><div className="profile-details"><section className="profile-block"><p className="eyebrow">Cómo entrena</p><p className="profile-bio">{coach.bio}</p><div className="tag-row large">{coach.tags.map((tag) => <span key={tag}>{tag}</span>)}</div></section><section className="profile-block"><div className="section-title"><p className="eyebrow">Servicios</p><span>Elige una opción</span></div><div className="service-list">{coach.services.map((item, index) => <button className={`service-row ${service === index ? 'selected' : ''}`} onClick={() => setService(index)} key={item.name}><span className="service-radio">{service === index && <Check />}</span><span><strong>{item.name}</strong><small>{item.detail}</small></span><b>{item.price} €</b></button>)}</div></section><section className="profile-block review-highlight"><div><p className="eyebrow">Lo que más se repite</p><p>“Explica con claridad, escucha y adapta el entrenamiento de verdad.”</p><span>Reseñas verificadas tras sesiones reales</span></div><Star fill="currentColor" /></section></div>
       <aside className="booking-card"><div className="booking-card-top"><p className="eyebrow">{packageId ? 'Sesión incluida en tu bono' : coach.services[service]?.packageSize && coach.services[service]!.packageSize! > 1 ? 'Tu bono' : 'Tu próxima sesión'}</p><strong>{packageId ? '0 €' : `${coach.services[service]?.price} €`}</strong><small>{coach.services[service]?.name} · cancelación gratis hasta 24 h antes</small></div>{(packageId || !coach.services[service]?.packageSize || coach.services[service]!.packageSize! <= 1) && <><p className="calendar-heading"><CalendarDays /> Horarios disponibles</p><div className="slot-grid">{slots.map((item) => <button key={item.starts_at} className={slot === item.starts_at ? 'selected' : ''} onClick={() => setSlot(item.starts_at)}>{item.label}</button>)}</div>{!slots.length && <p className="booking-note">No hay huecos publicados para los próximos días.</p>}</>}<Button className="full-button" onClick={reserve} disabled={busy || !coach.verified || ((Boolean(packageId) || !coach.services[service]?.packageSize || coach.services[service]!.packageSize! <= 1) && !slots.length)}>{busy && <LoaderCircle className="spin" />} {coach.verified ? (packageId ? 'Reservar con mi bono' : coach.services[service]?.packageSize && coach.services[service]!.packageSize! > 1 ? 'Comprar bono' : 'Reservar y pagar') : 'Pendiente de verificación'}</Button><button className="chat-cta" onClick={contact}><MessageCircle /> Preguntar antes de reservar</button><p className="booking-note"><ShieldCheck /> Pago protegido por Stripe. La dirección exacta nunca se muestra antes de confirmar.</p></aside>
     </div>{chatOpen && <QuickChat coach={coach} onClose={() => setChatOpen(false)} />}</section>
@@ -314,7 +353,7 @@ function QuickChat({ coach, onClose }: { coach: Coach; onClose: () => void }) {
       setSent((items) => [...items, message]); toast.success('Mensaje enviado')
     } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo enviar') }
   }
-  return <div className="modal-backdrop"><section className="chat-sheet" role="dialog" aria-modal="true" aria-labelledby="chat-title"><header><div className="avatar">{coach.initials}</div><div><p className="eyebrow">Conversación directa</p><h2 id="chat-title">{coach.name}</h2></div><button className="icon-button" onClick={onClose} aria-label="Cerrar chat"><X /></button></header><div className="chat-messages"><div className="message incoming">Hola, cuéntame qué quieres conseguir y qué horarios tienes.</div>{sent.map((item, index) => <div className="message outgoing" key={`${item}-${index}`}>{item}</div>)}</div><form className="chat-composer" onSubmit={send}><button type="button" aria-label="Adjuntar archivo"><Paperclip /></button><input aria-label="Mensaje" value={body} onChange={(event) => setBody(event.target.value)} placeholder="Escribe tu mensaje…" /><button type="submit" aria-label="Enviar"><Send /></button></form></section></div>
+  return <div className="modal-backdrop"><section className="chat-sheet" role="dialog" aria-modal="true" aria-labelledby="chat-title"><header><CoachAvatar coach={coach} className="avatar" /><div><p className="eyebrow">Conversación directa</p><h2 id="chat-title">{coach.name}</h2></div><button className="icon-button" onClick={onClose} aria-label="Cerrar chat"><X /></button></header><div className="chat-messages"><div className="message incoming">Hola, cuéntame qué quieres conseguir y qué horarios tienes.</div>{sent.map((item, index) => <div className="message outgoing" key={`${item}-${index}`}>{item}</div>)}</div><form className="chat-composer" onSubmit={send}><button type="button" aria-label="Adjuntar archivo"><Paperclip /></button><input aria-label="Mensaje" value={body} onChange={(event) => setBody(event.target.value)} placeholder="Escribe tu mensaje…" /><button type="submit" aria-label="Enviar"><Send /></button></form></section></div>
 }
 
 function Account({ onAuth }: { onAuth: () => void }) {

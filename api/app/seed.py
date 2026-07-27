@@ -13,8 +13,8 @@ CATEGORIES = [
 ]
 
 COACHES = [
-    CoachSummary(id="ines-martin", name="Inés Martín", specialty="Fuerza y movilidad", category="fitness", mode=ServiceMode.hybrid, city="Madrid", rating=4.9, reviews=42, price_from=32, next_slot="Hoy · 18:30", responds_now=True, verified=True),
-    CoachSummary(id="marcos-sanz", name="Marcos Sanz", specialty="Muay Thai", category="martial", mode=ServiceMode.in_person, city="Madrid", rating=5.0, reviews=28, price_from=28, next_slot="Hoy · 20:00", responds_now=True, verified=True),
-    CoachSummary(id="laura-cano", name="Laura Cano", specialty="Running y resistencia", category="running", mode=ServiceMode.online, city="Barcelona", rating=4.8, reviews=63, price_from=25, next_slot="Mañana · 07:30", responds_now=False, verified=True),
-    CoachSummary(id="diego-ortiz", name="Diego Ortiz", specialty="Movilidad y yoga", category="mobility", mode=ServiceMode.hybrid, city="Valencia", rating=4.7, reviews=19, price_from=24, next_slot="Jueves · 09:00", responds_now=False, verified=True),
+    CoachSummary(id="ines-martin", name="Inés Martín", avatar_url="/images/coaches/ines-martin.webp", specialty="Fuerza y movilidad", category="fitness", mode=ServiceMode.hybrid, city="Madrid", rating=4.9, reviews=42, price_from=32, next_slot="Hoy · 18:30", responds_now=True, verified=True),
+    CoachSummary(id="marcos-sanz", name="Marcos Sanz", avatar_url="/images/coaches/marcos-sanz.webp", specialty="Muay Thai", category="martial", mode=ServiceMode.in_person, city="Madrid", rating=5.0, reviews=28, price_from=28, next_slot="Hoy · 20:00", responds_now=True, verified=True),
+    CoachSummary(id="laura-cano", name="Laura Cano", avatar_url="/images/coaches/laura-cano.webp", specialty="Running y resistencia", category="running", mode=ServiceMode.online, city="Barcelona", rating=4.8, reviews=63, price_from=25, next_slot="Mañana · 07:30", responds_now=False, verified=True),
+    CoachSummary(id="diego-ortiz", name="Diego Ortiz", avatar_url="/images/coaches/diego-ortiz.webp", specialty="Movilidad y yoga", category="mobility", mode=ServiceMode.hybrid, city="Valencia", rating=4.7, reviews=19, price_from=24, next_slot="Jueves · 09:00", responds_now=False, verified=True),
 ]
