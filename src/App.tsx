@@ -1,23 +1,25 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent } from 'react'
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { Toaster, toast } from 'sonner'
 import {
   ArrowLeft, ArrowRight, BadgeCheck, Bell, CalendarDays, Check, ChevronDown, CircleDollarSign,
-  Clock3, CreditCard, Dumbbell, FileCheck2, Globe2, Languages, LayoutDashboard, LoaderCircle,
+  Clock3, CreditCard, FileCheck2, Globe2, Languages, LayoutDashboard, LoaderCircle,
   LogOut, MapPin, MessageCircle, Paperclip, Send, Settings2, ShieldCheck, SlidersHorizontal,
-  Sparkles, Star, Target, Trophy, Upload, UserRound, Video, X, Zap, type LucideIcon,
+  Sparkles, Star, Target, Upload, UserRound, Video, X, Zap,
 } from 'lucide-react'
 import { AuthProvider, useAuth } from './auth'
 import { AuthModal } from './components/AuthModal'
 import { CategorySelector } from './components/CategorySelector'
 import { CoachAvatar } from './components/CoachAvatar'
 import { HomeMatchStage } from './components/HomeMatchStage'
-import { getCategoryIcon, getTrainingIcon } from './components/icons/trainingIcons'
+import { getCategoryIcon } from './components/icons/trainingIcons'
 import { Button } from './components/ui/button'
 import { api, ApiError } from './lib/api'
+import { getCategoryVisual } from './lib/media'
 import { hasSupabase, supabase } from './lib/supabase'
 import { categories, coaches, isRemoteCoach, type Category, type Coach, type CoachService, type Mode } from './data'
+import { getQuestionnaireSteps, type QuestionnaireOption } from './questionnaire'
 import './i18n'
 
 type MatchApiCoach = {
@@ -29,13 +31,11 @@ type MatchApiResponse = { items: MatchApiCoach[]; relaxed_filter: string | null 
 type LocalBooking = { id: string; coachId: string; coachName: string; serviceName: string; startsAt: string; amount: number; status: string }
 type Profile = { id: string; display_name: string; role: 'consumer' | 'coach' | 'admin' }
 type AvailableSlot = { starts_at: string; ends_at: string; label: string }
-type QuestionnaireOption = { label: string; icon: LucideIcon }
-type QuestionnaireStep = { title: string; key: string; options: QuestionnaireOption[] }
-
+type ChatMessage = { id: string; conversation_id: string; sender_id: string; body: string; attachment_path?: string | null; created_at: string }
 const CoachMap = lazy(() => import('./components/CoachMap').then((module) => ({ default: module.CoachMap })))
 
-const toQuestionOptions = (labels: string[], categoryId?: string): QuestionnaireOption[] =>
-  labels.map((label) => ({ label, icon: getTrainingIcon(label, categoryId) }))
+const mergeMessage = (items: ChatMessage[], row: ChatMessage) =>
+  items.some((item) => item.id === row.id) ? items : [...items, row]
 
 const fallbackCoach = (row: MatchApiCoach): Coach => ({
   id: row.id, name: row.name, initials: row.name.split(' ').map((part) => part[0]).join('').slice(0, 2).toUpperCase(),
@@ -103,6 +103,9 @@ function Home() {
   const [previewId, setPreviewId] = useState(categories[0].id)
   const [answers, setAnswers] = useState<Record<string, string>>({})
   const categorySelectorRef = useRef<HTMLElement>(null)
+  useEffect(() => {
+    if (step > 0) window.scrollTo({ top: 0, behavior: 'auto' })
+  }, [step])
   const begin = (item: Category) => { setCategory(item); setAnswers({ category: item.id }); setStep(1) }
   const answer = (key: string, value: string) => { setAnswers((current) => ({ ...current, [key]: value })); setStep((current) => current + 1) }
   const finish = (priority: string) => {
@@ -178,40 +181,172 @@ function Home() {
       }}
     />
   </section>
-  const steps: QuestionnaireStep[] = [
-    { title: '¿Qué disciplina encaja mejor?', key: 'subcategory', options: toQuestionOptions(category?.examples || [], category?.id) },
-    { title: '¿Qué quieres conseguir?', key: 'goal', options: [{ label: 'Ganar fuerza', icon: Dumbbell }, { label: 'Perder peso', icon: getTrainingIcon('Perder peso', 'fitness') }, { label: 'Moverme mejor', icon: getTrainingIcon('Movilidad', 'mobility') }, { label: 'Prepararme para competir', icon: Trophy }] },
-    { title: '¿Cómo quieres entrenar?', key: 'mode', options: [{ label: 'Online', icon: Globe2 }, { label: 'Presencial', icon: MapPin }, { label: 'Me da igual', icon: SlidersHorizontal }] },
-    { title: '¿Cuándo te viene bien?', key: 'availability', options: [{ label: 'Responde ahora', icon: Zap }, { label: 'Esta semana', icon: CalendarDays }, { label: 'Flexible', icon: Clock3 }] },
-    { title: '¿Dónde estás?', key: 'city', options: [{ label: 'Madrid', icon: MapPin }, { label: 'Barcelona', icon: MapPin }, { label: 'Valencia', icon: MapPin }, { label: 'Cualquier sitio si es online', icon: Globe2 }] },
-    { title: '¿Qué presupuesto tienes por sesión?', key: 'budget', options: ['Hasta 25 €', 'Hasta 35 €', 'Hasta 50 €', 'Flexible'].map((label) => ({ label, icon: CircleDollarSign })) },
-    { title: '¿En qué idioma prefieres entrenar?', key: 'language', options: ['Español', 'Inglés', 'Me da igual'].map((label) => ({ label, icon: Languages })) },
-  ]
+  if (!category) return null
+  const steps = getQuestionnaireSteps(category, answers)
   const current = steps[step - 1]
   return <section className="question-screen" aria-labelledby="question-title">
     <div className="question-progress"><span>02 — Afinemos la búsqueda</span><div><i style={{ width: `${Math.min(100, step / (steps.length + 1) * 100)}%` }} /></div><b>{String(step).padStart(2, '0')}<small>/{String(steps.length + 1).padStart(2, '0')}</small></b></div>
-    <div className="question-wrap"><button className="back-link" onClick={() => setStep(Math.max(0, step - 1))}><ArrowLeft /> Atrás</button><p className="eyebrow">{category?.label}</p>
-      {current ? <Question title={current.title} options={current.options} onSelect={(value) => answer(current.key, value)} /> : <div className="final-question"><p className="eyebrow">Casi listo</p><h2 id="question-title">¿Qué pesa más para ti?</h2><p className="question-intro">Usaremos tu respuesta para ordenar los resultados, no para encerrarte en un filtro.</p><div className="option-list">{([{ label: 'La mejor coincidencia', icon: Target }, { label: 'Que responda ahora', icon: Zap }, { label: 'La experiencia y las reseñas', icon: Star }, { label: 'El precio', icon: CircleDollarSign }] as QuestionnaireOption[]).map((option, index) => <OptionButton key={option.label} option={option} index={index} onSelect={() => finish(option.label)} />)}</div></div>}
+    <div className="question-layout">
+      <QuestionnaireContext category={category} answers={answers} step={step} total={steps.length + 1} onChange={() => setStep(0)} />
+      <div className="question-wrap"><button type="button" className="back-link" onClick={() => setStep(Math.max(0, step - 1))}><ArrowLeft /> Atrás</button>
+        {current?.kind === 'location'
+          ? <LocationQuestion title={current.title} initialValue={answers.city} onSelect={(value) => answer(current.key, value)} />
+          : current
+            ? <Question title={current.title} options={current.options} onSelect={(value) => answer(current.key, value)} />
+            : <div className="final-question"><p className="eyebrow">Casi listo</p><h2 id="question-title">¿Qué pesa más para ti?</h2><p className="question-intro">Usaremos tu respuesta para ordenar los resultados, no para encerrarte en un filtro.</p><div className="option-list">{([{ label: 'La mejor coincidencia', icon: Target }, { label: 'Que responda ahora', icon: Zap }, { label: 'La experiencia y las reseñas', icon: Star }, { label: 'El precio', icon: CircleDollarSign }] as QuestionnaireOption[]).map((option, index) => <OptionButton key={option.label} option={option} index={index} onSelect={() => finish(option.label)} />)}</div></div>}
+      </div>
     </div>
   </section>
 }
 
+const questionAccentColors: Record<string, string> = {
+  lime: '#c8ff20', coral: '#ff927d', blue: '#9ed8ff', gold: '#f3d47a',
+  violet: '#c9c0ff', pink: '#ffbed8', mint: '#a9efd6', sand: '#dfc6a2',
+}
+
+function QuestionnaireContext({ category, answers, step, total, onChange }: { category: Category; answers: Record<string, string>; step: number; total: number; onChange: () => void }) {
+  const visual = getCategoryVisual(category.id)
+  const CategoryIcon = getCategoryIcon(category.id)
+  const style = { '--question-accent': questionAccentColors[category.accent] || questionAccentColors.lime } as CSSProperties
+  return <aside className="question-category-card" style={style} aria-label={`Especialidad elegida: ${category.label}`}>
+    <picture className="question-category-photo" aria-hidden="true">
+      <source srcSet={visual.avif} type="image/avif" />
+      <img src={visual.webp} alt="" width="800" height="600" decoding="async" style={{ objectPosition: visual.objectPosition }} />
+    </picture>
+    <div className="question-category-content">
+      <span className="question-category-kicker"><CategoryIcon aria-hidden="true" /> Especialidad elegida</span>
+      <strong>{category.label}</strong>
+      <p>{answers.subcategory || category.kicker}</p>
+    </div>
+    <div className="question-category-foot"><span>Paso {String(step).padStart(2, '0')} de {String(total).padStart(2, '0')}</span><button type="button" onClick={onChange}>Cambiar</button></div>
+  </aside>
+}
+
 function OptionButton({ option, index, onSelect }: { option: QuestionnaireOption; index: number; onSelect: () => void }) {
   const Icon = option.icon
-  return <button className="option-card" onClick={onSelect}><span className="option-icon" aria-hidden="true"><Icon /></span><span className="option-index" aria-hidden="true">0{index + 1}</span><strong>{option.label}</strong><ArrowRight aria-hidden="true" /></button>
+  return <button type="button" className="option-card" onClick={onSelect}><span className="option-icon" aria-hidden="true"><Icon /></span><span className="option-index" aria-hidden="true">0{index + 1}</span><strong>{option.label}</strong><ArrowRight aria-hidden="true" /></button>
 }
 
 function Question({ title, options, onSelect }: { title: string; options: QuestionnaireOption[]; onSelect: (value: string) => void }) {
   return <div className="question-content"><p className="eyebrow">Una respuesta rápida</p><h2 id="question-title">{title}</h2><div className="option-list">{options.map((option, index) => <OptionButton key={option.label} option={option} index={index} onSelect={() => onSelect(option.label)} />)}</div></div>
 }
 
+type PhotonFeature = {
+  properties: {
+    osm_type?: string; osm_id?: number; name?: string; city?: string; county?: string
+    state?: string; postcode?: string; countrycode?: string; type?: string; osm_key?: string
+  }
+}
+type LocationSuggestion = { id: string; label: string; name: string; detail: string; value: string }
+
+function toLocationSuggestions(features: PhotonFeature[]): LocationSuggestion[] {
+  const seen = new Set<string>()
+  return features.flatMap((feature, index) => {
+    const properties = feature.properties
+    const name = properties.name?.trim()
+    if (!name || properties.countrycode?.toUpperCase() !== 'ES' || !['place', 'boundary'].includes(properties.osm_key || '')) return []
+    const detailParts = [properties.postcode, properties.city, properties.county, properties.state]
+      .map((part) => part?.trim())
+      .filter((part): part is string => Boolean(part) && part?.toLocaleLowerCase('es') !== name.toLocaleLowerCase('es'))
+      .filter((part, partIndex, parts) => parts.findIndex((candidate) => candidate.toLocaleLowerCase('es') === part.toLocaleLowerCase('es')) === partIndex)
+    const detail = detailParts.join(' · ')
+    const label = detail ? `${name}, ${detail}` : name
+    if (seen.has(label.toLocaleLowerCase('es'))) return []
+    seen.add(label.toLocaleLowerCase('es'))
+    return [{
+      id: `${properties.osm_type || 'place'}-${properties.osm_id || index}`,
+      label,
+      name,
+      detail: detail || 'España',
+      value: properties.city?.trim() || name,
+    }]
+  })
+}
+
+function LocationQuestion({ title, initialValue, onSelect }: { title: string; initialValue?: string; onSelect: (value: string) => void }) {
+  const [locationValue, setLocationValue] = useState(initialValue || '')
+  const [selectedLocation, setSelectedLocation] = useState<LocationSuggestion | null>(null)
+  const [suggestions, setSuggestions] = useState<LocationSuggestion[]>([])
+  const [lookupState, setLookupState] = useState<'idle' | 'loading' | 'ready' | 'empty' | 'error'>('idle')
+  const [retryToken, setRetryToken] = useState(0)
+
+  useEffect(() => {
+    const query = locationValue.trim()
+    if (selectedLocation?.label === query || query.length < 3) {
+      setSuggestions([])
+      if (query.length < 3) setLookupState('idle')
+      return
+    }
+
+    const controller = new AbortController()
+    const timeout = window.setTimeout(async () => {
+      setLookupState('loading')
+      try {
+        const url = new URL('https://photon.komoot.io/api/')
+        url.searchParams.set('q', query)
+        url.searchParams.set('limit', '6')
+        url.searchParams.set('countrycode', 'ES')
+        if (!/^\d/.test(query)) {
+          for (const layer of ['city', 'locality', 'district', 'county', 'state']) url.searchParams.append('layer', layer)
+        }
+        const response = await fetch(url, { signal: controller.signal })
+        if (!response.ok) throw new Error('Location lookup failed')
+        const data = await response.json() as { features?: PhotonFeature[] }
+        const nextSuggestions = toLocationSuggestions(data.features || []).slice(0, 5)
+        setSuggestions(nextSuggestions)
+        setLookupState(nextSuggestions.length ? 'ready' : 'empty')
+      } catch (error) {
+        if ((error as Error).name !== 'AbortError') {
+          setSuggestions([])
+          setLookupState('error')
+        }
+      }
+    }, 400)
+
+    return () => {
+      window.clearTimeout(timeout)
+      controller.abort()
+    }
+  }, [locationValue, retryToken, selectedLocation])
+
+  const chooseLocation = (suggestion: LocationSuggestion) => {
+    setLocationValue(suggestion.label)
+    setSelectedLocation(suggestion)
+    setSuggestions([])
+    setLookupState('ready')
+  }
+
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (selectedLocation) onSelect(selectedLocation.value)
+  }
+  return <div className="question-content location-question"><p className="eyebrow">Elige una ubicación real</p><h2 id="question-title">{title}</h2><p className="location-copy" id="location-help">Empieza a escribir y selecciona la coincidencia correcta.</p>
+    <form className="location-form" onSubmit={submit}>
+      <label className="sr-only" htmlFor="location-input">Ciudad, municipio, barrio o código postal</label>
+      <div className={`location-input-shell ${selectedLocation ? 'is-selected' : ''}`}><MapPin aria-hidden="true" /><input id="location-input" role="combobox" aria-autocomplete="list" aria-expanded={suggestions.length > 0} aria-controls="location-suggestions" value={locationValue} onChange={(event) => { setLocationValue(event.target.value); setSelectedLocation(null); setLookupState('idle') }} placeholder="Por ejemplo, Sevilla, Getxo o 29010" autoComplete="off" aria-describedby="location-help location-status" autoFocus /><button type="submit" disabled={!selectedLocation} aria-label="Continuar con esta ubicación">{selectedLocation ? <Check aria-hidden="true" /> : <ArrowRight aria-hidden="true" />}</button></div>
+      <div className="location-status" id="location-status" aria-live="polite">
+        {lookupState === 'loading' && <span><LoaderCircle className="spin" aria-hidden="true" /> Buscando coincidencias…</span>}
+        {lookupState === 'empty' && <span>No encontramos ese lugar. Prueba con el municipio o el código postal.</span>}
+        {lookupState === 'error' && <span>No pudimos consultar las ubicaciones. <button type="button" onClick={() => setRetryToken((value) => value + 1)}>Reintentar</button></span>}
+        {selectedLocation && <span className="location-confirmed"><Check aria-hidden="true" /> Ubicación seleccionada</span>}
+      </div>
+      <div className="location-suggestions" id="location-suggestions" role="listbox" aria-label="Coincidencias de ubicación">
+        {suggestions.map((suggestion) => <button type="button" role="option" aria-selected="false" key={suggestion.id} onClick={() => chooseLocation(suggestion)}><MapPin aria-hidden="true" /><span><strong>{suggestion.name}</strong><small>{suggestion.detail}</small></span><ArrowRight aria-hidden="true" /></button>)}
+      </div>
+      <small>Resultados de <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a>. Selecciona uno para continuar.</small>
+    </form>
+    <button type="button" className="location-online" onClick={() => onSelect('Cualquier lugar si es online')}><span className="option-icon"><Globe2 aria-hidden="true" /></span><span><strong>Cualquier lugar si es online</strong><small>Buscaremos entrenadores online sin filtrar por zona.</small></span><ArrowRight aria-hidden="true" /></button>
+  </div>
+}
+
 function Results() {
   const navigate = useNavigate()
   const [search] = useSearchParams()
+  const requestedOnline = search.get('mode') === 'Online' || search.get('city')?.startsWith('Cualquier') === true
   const [items, setItems] = useState<Coach[]>(coaches)
   const [loading, setLoading] = useState(true)
   const [relaxedFilter, setRelaxedFilter] = useState<string | null>(null)
-  const [mode, setMode] = useState<'all' | 'online' | 'presencial'>('all')
+  const [mode, setMode] = useState<'all' | 'online' | 'presencial'>(requestedOnline ? 'online' : 'all')
   const [sort, setSort] = useState(search.get('priority')?.includes('precio') ? 'price' : 'match')
   const [mapOpen, setMapOpen] = useState(false)
   const category = search.get('category') || 'fitness'
@@ -227,7 +362,7 @@ function Results() {
       goal: search.get('goal'),
       city: search.get('city')?.startsWith('Cualquier') ? undefined : search.get('city'),
       availability: search.get('availability'),
-      mode: rawMode === 'Online' ? 'online' : rawMode === 'Presencial' ? 'presencial' : undefined,
+      mode: requestedOnline || rawMode === 'Online' ? 'online' : rawMode === 'Presencial' ? 'presencial' : undefined,
       max_price: rawBudget?.startsWith('Hasta') ? Number(rawBudget.match(/\d+/)?.[0]) : undefined,
       languages: language === 'Español' ? ['es'] : language === 'Inglés' ? ['en'] : [],
       priority,
@@ -240,7 +375,7 @@ function Results() {
         toast.error(error instanceof Error ? `${error.message} Mostramos resultados de demostración.` : 'Mostramos resultados de demostración.')
       })
       .finally(() => setLoading(false))
-  }, [category, search])
+  }, [category, requestedOnline, search])
   const shown = useMemo(() => {
     const filtered = items.filter((coach) => (mode === 'all' || coach.mode === mode || coach.mode === 'hibrido') && (coach.category === category || !items.some((item) => item.category === category)))
     return [...filtered].sort((a, b) => sort === 'price' ? a.price - b.price : sort === 'rating' ? b.rating - a.rating : sort === 'availability' ? Number(b.onlineNow) - Number(a.onlineNow) : Number(b.category === category) * 65 - Number(a.category === category) * 65 || b.rating - a.rating)
@@ -329,7 +464,11 @@ function CoachProfile({ onAuth }: { onAuth: () => void }) {
       }
     } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo reservar') } finally { setBusy(false) }
   }
-  const contact = () => { if (!user) return onAuth(); setChatOpen(true) }
+  const contact = () => {
+    if (!user) return onAuth()
+    if (!isRemoteCoach(coach.id)) return toast.error('Este perfil es de demostración y no admite mensajes. Elige un entrenador publicado.')
+    setChatOpen(true)
+  }
   return <section className="profile-screen"><Link className="back-link" to="/buscar"><ArrowLeft /> Volver a resultados</Link><div className="profile-hero"><CoachAvatar coach={coach} className="profile-avatar" eager /><div className="profile-title"><div className="profile-title-line"><h1>{coach.name}</h1>{coach.onlineNow && <span className="live-badge">Disponible ahora</span>}</div><p>{coach.specialty} · {coach.city}</p><div className="profile-rating"><Star fill="currentColor" /><strong>{coach.rating}</strong><span>{coach.reviews} reseñas</span>{coach.verified && <span className="verified-copy"><BadgeCheck /> Identidad y título verificados</span>}</div></div></div>
     <div className="profile-grid"><div className="profile-details"><section className="profile-block"><p className="eyebrow">Cómo entrena</p><p className="profile-bio">{coach.bio}</p><div className="tag-row large">{coach.tags.map((tag) => <span key={tag}>{tag}</span>)}</div></section><section className="profile-block"><div className="section-title"><p className="eyebrow">Servicios</p><span>Elige una opción</span></div><div className="service-list">{coach.services.map((item, index) => <button className={`service-row ${service === index ? 'selected' : ''}`} onClick={() => setService(index)} key={item.name}><span className="service-radio">{service === index && <Check />}</span><span><strong>{item.name}</strong><small>{item.detail}</small></span><b>{item.price} €</b></button>)}</div></section><section className="profile-block review-highlight"><div><p className="eyebrow">Lo que más se repite</p><p>“Explica con claridad, escucha y adapta el entrenamiento de verdad.”</p><span>Reseñas verificadas tras sesiones reales</span></div><Star fill="currentColor" /></section></div>
       <aside className="booking-card"><div className="booking-card-top"><p className="eyebrow">{packageId ? 'Sesión incluida en tu bono' : coach.services[service]?.packageSize && coach.services[service]!.packageSize! > 1 ? 'Tu bono' : 'Tu próxima sesión'}</p><strong>{packageId ? '0 €' : `${coach.services[service]?.price} €`}</strong><small>{coach.services[service]?.name} · cancelación gratis hasta 24 h antes</small></div>{(packageId || !coach.services[service]?.packageSize || coach.services[service]!.packageSize! <= 1) && <><p className="calendar-heading"><CalendarDays /> Horarios disponibles</p><div className="slot-grid">{slots.map((item) => <button key={item.starts_at} className={slot === item.starts_at ? 'selected' : ''} onClick={() => setSlot(item.starts_at)}>{item.label}</button>)}</div>{!slots.length && <p className="booking-note">No hay huecos publicados para los próximos días.</p>}</>}<Button className="full-button" onClick={reserve} disabled={busy || !coach.verified || ((Boolean(packageId) || !coach.services[service]?.packageSize || coach.services[service]!.packageSize! <= 1) && !slots.length)}>{busy && <LoaderCircle className="spin" />} {coach.verified ? (packageId ? 'Reservar con mi bono' : coach.services[service]?.packageSize && coach.services[service]!.packageSize! > 1 ? 'Comprar bono' : 'Reservar y pagar') : 'Pendiente de verificación'}</Button><button className="chat-cta" onClick={contact}><MessageCircle /> Preguntar antes de reservar</button><p className="booking-note"><ShieldCheck /> Pago protegido por Stripe. La dirección exacta nunca se muestra antes de confirmar.</p></aside>
@@ -339,21 +478,30 @@ function CoachProfile({ onAuth }: { onAuth: () => void }) {
 function QuickChat({ coach, onClose }: { coach: Coach; onClose: () => void }) {
   const { user } = useAuth()
   const [body, setBody] = useState('')
-  const [sent, setSent] = useState<string[]>([])
+  const [sent, setSent] = useState<ChatMessage[]>([])
   const [conversationId, setConversationId] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
   const send = async (event: FormEvent) => {
     event.preventDefault(); if (!body.trim() || !user) return
-    const message = body.trim(); setBody('')
+    const message = body.trim()
+    setBusy(true)
     try {
-      if (isRemoteCoach(coach.id)) {
-        let id = conversationId
-        if (!id) { const conversation = await api<{ id: string }>('/api/v1/conversations', { method: 'POST', body: JSON.stringify({ coach_id: coach.id }) }); id = conversation.id; setConversationId(id) }
-        await api(`/api/v1/conversations/${id}/messages`, { method: 'POST', body: JSON.stringify({ body: message }) })
+      if (!isRemoteCoach(coach.id)) throw new Error('Este perfil no puede recibir mensajes reales.')
+      let id = conversationId
+      if (!id) {
+        const conversation = await api<{ id: string }>('/api/v1/conversations', { method: 'POST', body: JSON.stringify({ coach_id: coach.id }) })
+        id = conversation.id
+        setConversationId(id)
       }
-      setSent((items) => [...items, message]); toast.success('Mensaje enviado')
-    } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo enviar') }
+      const row = await api<ChatMessage>(`/api/v1/conversations/${id}/messages`, { method: 'POST', body: JSON.stringify({ body: message }) })
+      setSent((items) => mergeMessage(items, row))
+      setBody('')
+      toast.success('Mensaje guardado y enviado')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'No se pudo enviar')
+    } finally { setBusy(false) }
   }
-  return <div className="modal-backdrop"><section className="chat-sheet" role="dialog" aria-modal="true" aria-labelledby="chat-title"><header><CoachAvatar coach={coach} className="avatar" /><div><p className="eyebrow">Conversación directa</p><h2 id="chat-title">{coach.name}</h2></div><button className="icon-button" onClick={onClose} aria-label="Cerrar chat"><X /></button></header><div className="chat-messages"><div className="message incoming">Hola, cuéntame qué quieres conseguir y qué horarios tienes.</div>{sent.map((item, index) => <div className="message outgoing" key={`${item}-${index}`}>{item}</div>)}</div><form className="chat-composer" onSubmit={send}><button type="button" aria-label="Adjuntar archivo"><Paperclip /></button><input aria-label="Mensaje" value={body} onChange={(event) => setBody(event.target.value)} placeholder="Escribe tu mensaje…" /><button type="submit" aria-label="Enviar"><Send /></button></form></section></div>
+  return <div className="modal-backdrop"><section className="chat-sheet" role="dialog" aria-modal="true" aria-labelledby="chat-title"><header><CoachAvatar coach={coach} className="avatar" /><div><p className="eyebrow">Conversación directa</p><h2 id="chat-title">{coach.name}</h2></div><button className="icon-button" onClick={onClose} aria-label="Cerrar chat"><X /></button></header><div className="chat-messages"><div className="message incoming">Hola, cuéntame qué quieres conseguir y qué horarios tienes.</div>{sent.map((item) => <div className="message outgoing" key={item.id}>{item.body}<small>{new Date(item.created_at).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</small></div>)}</div>{conversationId && <Link className="chat-open-link" to={`/mensajes?conversation=${conversationId}`} onClick={onClose}>Abrir conversación completa <ArrowRight /></Link>}<form className="chat-composer" onSubmit={send}><button type="button" aria-label="Adjuntar archivo" disabled><Paperclip /></button><input aria-label="Mensaje" value={body} onChange={(event) => setBody(event.target.value)} placeholder="Escribe tu mensaje…" disabled={busy} /><button type="submit" aria-label="Enviar" disabled={busy || !body.trim()}>{busy ? <LoaderCircle className="spin" /> : <Send />}</button></form></section></div>
 }
 
 function Account({ onAuth }: { onAuth: () => void }) {
@@ -385,20 +533,42 @@ function Account({ onAuth }: { onAuth: () => void }) {
 
 function Messages({ onAuth }: { onAuth: () => void }) {
   const { user, loading } = useAuth()
+  const [search, setSearch] = useSearchParams()
   const [conversations, setConversations] = useState<any[]>([])
   const [active, setActive] = useState<string | null>(null)
-  const [messages, setMessages] = useState<any[]>([])
+  const [messages, setMessages] = useState<ChatMessage[]>([])
   const [body, setBody] = useState('')
-  useEffect(() => { if (user) api<any[]>('/api/v1/conversations').then((rows) => { setConversations(rows); if (rows[0]) setActive(rows[0].id) }).catch(() => undefined) }, [user])
+  const [busy, setBusy] = useState(false)
+  const [loadError, setLoadError] = useState('')
+  useEffect(() => {
+    if (!user) return
+    api<any[]>('/api/v1/conversations').then((rows) => {
+      setConversations(rows)
+      const requested = search.get('conversation')
+      setActive(rows.find((item) => item.id === requested)?.id || rows[0]?.id || null)
+      setLoadError('')
+    }).catch((error) => setLoadError(error instanceof Error ? error.message : 'No se pudieron cargar las conversaciones'))
+  }, [user])
   useEffect(() => {
     if (!active) return
-    api<any[]>(`/api/v1/conversations/${active}/messages`).then(setMessages).catch(() => undefined)
-    const channel = supabase.channel(`conversation:${active}`).on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `conversation_id=eq.${active}` }, (payload) => setMessages((current) => current.some((item) => item.id === (payload.new as any).id) ? current : [...current, payload.new])).subscribe()
+    setMessages([])
+    api<ChatMessage[]>(`/api/v1/conversations/${active}/messages`).then((rows) => { setMessages(rows); setLoadError('') }).catch((error) => setLoadError(error instanceof Error ? error.message : 'No se pudieron cargar los mensajes'))
+    const channel = supabase.channel(`conversation:${active}`).on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `conversation_id=eq.${active}` }, (payload) => setMessages((current) => mergeMessage(current, payload.new as ChatMessage))).subscribe()
     return () => { void supabase.removeChannel(channel) }
   }, [active])
   if (loading) return <LoadingPage />
   if (!user) return <AuthRequired onAuth={onAuth} title="Habla directamente con tu entrenador." />
-  const send = async (event: FormEvent) => { event.preventDefault(); if (!active || !body.trim()) return; const text = body; setBody(''); try { const row = await api(`/api/v1/conversations/${active}/messages`, { method: 'POST', body: JSON.stringify({ body: text }) }); setMessages((items) => [...items, row]) } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo enviar') } }
+  const chooseConversation = (id: string) => { setActive(id); setSearch({ conversation: id }, { replace: true }) }
+  const send = async (event: FormEvent) => {
+    event.preventDefault(); if (!active || !body.trim() || busy) return
+    const text = body.trim()
+    setBusy(true)
+    try {
+      const row = await api<ChatMessage>(`/api/v1/conversations/${active}/messages`, { method: 'POST', body: JSON.stringify({ body: text }) })
+      setMessages((items) => mergeMessage(items, row))
+      setBody('')
+    } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo enviar') } finally { setBusy(false) }
+  }
   const activeConversation = conversations.find((item) => item.id === active)
   const activeOther = activeConversation ? (activeConversation.consumer_id === user.id ? activeConversation.coach : activeConversation.consumer) : null
   const attach = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -408,8 +578,8 @@ function Messages({ onAuth }: { onAuth: () => void }) {
     const { error } = await supabase.storage.from('chat-files').upload(path, file)
     if (error) return toast.error(error.message)
     try {
-      const row = await api(`/api/v1/conversations/${active}/messages`, { method: 'POST', body: JSON.stringify({ body: file.name, attachment_path: path }) })
-      setMessages((items) => [...items, row])
+      const row = await api<ChatMessage>(`/api/v1/conversations/${active}/messages`, { method: 'POST', body: JSON.stringify({ body: file.name, attachment_path: path }) })
+      setMessages((items) => mergeMessage(items, row))
     } catch (apiError) { toast.error(apiError instanceof Error ? apiError.message : 'No se pudo adjuntar') }
   }
   const openAttachment = async (path: string) => {
@@ -427,7 +597,7 @@ function Messages({ onAuth }: { onAuth: () => void }) {
     if (!activeOther?.id) return
     try { await api('/api/v1/blocks', { method: 'POST', body: JSON.stringify({ user_id: activeOther.id }) }); toast.success('Usuario bloqueado') } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo bloquear') }
   }
-  return <section className="messages-screen"><div className="messages-head"><p className="eyebrow">Mensajería privada</p><h1>Tus conversaciones.</h1></div><div className="inbox"><aside>{conversations.map((item) => { const other = item.consumer_id === user.id ? item.coach : item.consumer; return <button className={active === item.id ? 'active' : ''} key={item.id} onClick={() => setActive(item.id)}><span className="avatar">{(other?.display_name || 'CC').slice(0, 2).toUpperCase()}</span><span><strong>{other?.display_name || 'CoachConnect'}</strong><small>Conversación segura</small></span></button> })}{!conversations.length && <p>Aún no tienes conversaciones.</p>}</aside><div className="conversation">{active && <div className="conversation-actions"><strong>{activeOther?.display_name || 'CoachConnect'}</strong><button className="text-button" onClick={reportConversation}>Denunciar</button><button className="text-button" onClick={blockActiveUser}>Bloquear</button></div>}<div className="chat-messages">{messages.map((item) => <div className={`message ${item.sender_id === user.id ? 'outgoing' : 'incoming'}`} key={item.id}>{item.body}{item.attachment_path && <button className="attachment-link" onClick={() => openAttachment(item.attachment_path)}><Paperclip /> Abrir archivo</button>}<small>{new Date(item.created_at).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</small></div>)}</div>{active && <form className="chat-composer" onSubmit={send}><label className="attachment-button" aria-label="Adjuntar archivo"><Paperclip /><input type="file" accept=".pdf,image/jpeg,image/png,image/webp" onChange={attach} /></label><input aria-label="Mensaje" value={body} onChange={(event) => setBody(event.target.value)} placeholder="Escribe un mensaje…" /><button type="submit" aria-label="Enviar"><Send /></button></form>}</div></div></section>
+  return <section className="messages-screen"><Link className="back-link messages-back" to="/cuenta"><ArrowLeft /> Volver a mi cuenta</Link><div className="messages-head"><p className="eyebrow">Mensajería privada</p><h1>Tus conversaciones.</h1></div>{loadError && <p className="inbox-error" role="alert">{loadError}</p>}<div className="inbox"><aside>{conversations.map((item) => { const other = item.consumer_id === user.id ? item.coach : item.consumer; return <button className={active === item.id ? 'active' : ''} key={item.id} onClick={() => chooseConversation(item.id)}><span className="avatar">{(other?.display_name || 'CC').slice(0, 2).toUpperCase()}</span><span><strong>{other?.display_name || 'CoachConnect'}</strong><small>Conversación segura</small></span></button> })}{!conversations.length && <p>Aún no tienes conversaciones.</p>}</aside><div className="conversation">{active && <div className="conversation-actions"><strong>{activeOther?.display_name || 'CoachConnect'}</strong><button className="text-button" onClick={reportConversation}>Denunciar</button><button className="text-button" onClick={blockActiveUser}>Bloquear</button></div>}<div className="chat-messages">{messages.map((item) => <div className={`message ${item.sender_id === user.id ? 'outgoing' : 'incoming'}`} key={item.id}>{item.body}{item.attachment_path && <button className="attachment-link" onClick={() => openAttachment(item.attachment_path || '')}><Paperclip /> Abrir archivo</button>}<small>{new Date(item.created_at).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</small></div>)}</div>{active && <form className="chat-composer" onSubmit={send}><label className="attachment-button" aria-label="Adjuntar archivo"><Paperclip /><input type="file" accept=".pdf,image/jpeg,image/png,image/webp" onChange={attach} /></label><input aria-label="Mensaje" value={body} onChange={(event) => setBody(event.target.value)} placeholder="Escribe un mensaje…" disabled={busy} /><button type="submit" aria-label="Enviar" disabled={busy || !body.trim()}>{busy ? <LoaderCircle className="spin" /> : <Send />}</button></form>}</div></div></section>
 }
 
 function Notifications({ onAuth }: { onAuth: () => void }) {

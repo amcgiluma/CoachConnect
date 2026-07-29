@@ -7,6 +7,9 @@ describe('training icon registry', () => {
     expect(getTrainingIcon('Natación', 'running').displayName).toMatch(/waves/i)
     expect(getTrainingIcon('Boxeo', 'martial').displayName).toMatch(/boxingglove/i)
     expect(getTrainingIcon('Kung fu', 'martial').displayName).toMatch(/kungfu/i)
+    expect(getTrainingIcon('Fútbol', 'sport').displayName).toMatch(/footballball/i)
+    expect(getTrainingIcon('Pádel', 'sport').displayName).toMatch(/padelracket/i)
+    expect(getTrainingIcon('Tenis', 'sport').displayName).toMatch(/tennisracket/i)
   })
 
   it('falls back to the parent category and then to a neutral symbol', () => {

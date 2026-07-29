@@ -65,6 +65,27 @@ const KungFu = createLucideIcon('KungFu', [
   ['path', { d: 'm11 14 5 5 4-1', key: 'kf-6' }],
 ])
 
+const FootballBall = createLucideIcon('FootballBall', [
+  ['circle', { cx: '12', cy: '12', r: '9', key: 'fb-1' }],
+  ['path', { d: 'm12 7.4 3.2 2.3-1.2 3.8h-4l-1.2-3.8Z', key: 'fb-2' }],
+  ['path', { d: 'M12 7.4V3m3.2 6.7 4.1-1.4M14 13.5l2.5 3.8M10 13.5l-2.5 3.8M8.8 9.7 4.7 8.3', key: 'fb-3' }],
+])
+
+const TennisRacket = createLucideIcon('TennisRacket', [
+  ['ellipse', { cx: '9.2', cy: '8.3', rx: '5.2', ry: '7', transform: 'rotate(-42 9.2 8.3)', key: 'tr-1' }],
+  ['path', { d: 'm13 13 7.5 7.5M16.5 17.5l-2 2', key: 'tr-2' }],
+  ['path', { d: 'M5.4 5.5 13 11M4.3 9l6.3 4.6M8.2 2.8l6.2 4.5M5.8 12.7 12.9 4', key: 'tr-3' }],
+])
+
+const PadelRacket = createLucideIcon('PadelRacket', [
+  ['path', { d: 'M7.2 3.8c2.8-2.5 7.4-2 9.5.8s1.4 7.4-1.4 9.5c-2.1 1.6-5 1.8-7 .3-3.3-2.4-4.1-7.8-1.1-10.6Z', key: 'pr-1' }],
+  ['path', { d: 'm13.8 14.8 6.3 6.3M17.4 18.4l-1.8 1.8', key: 'pr-2' }],
+  ['circle', { cx: '9', cy: '7', r: '.45', fill: 'currentColor', key: 'pr-3' }],
+  ['circle', { cx: '12', cy: '6', r: '.45', fill: 'currentColor', key: 'pr-4' }],
+  ['circle', { cx: '14.5', cy: '8.5', r: '.45', fill: 'currentColor', key: 'pr-5' }],
+  ['circle', { cx: '10', cy: '10.5', r: '.45', fill: 'currentColor', key: 'pr-6' }],
+])
+
 export const categoryIcons: Record<string, LucideIcon> = {
   fitness: Dumbbell,
   martial: Swords,
@@ -103,12 +124,12 @@ const optionIcons: Record<string, LucideIcon> = {
   Flexibility: MoveDiagonal2,
   Movilidad: RotateCcw,
   Mobility: RotateCcw,
-  Fútbol: Goal,
-  Football: Goal,
-  Pádel: Target,
-  Padel: Target,
-  Tenis: CircleDot,
-  Tennis: CircleDot,
+  Fútbol: FootballBall,
+  Football: FootballBall,
+  Pádel: PadelRacket,
+  Padel: PadelRacket,
+  Tenis: TennisRacket,
+  Tennis: TennisRacket,
   Rendimiento: Medal,
   Performance: Medal,
   'Danza urbana': AudioWaveform,

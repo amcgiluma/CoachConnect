@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import base64
+from html import escape
 import hashlib
 import hmac
+import logging
 import time
 from typing import Any
 from urllib.parse import urlencode
@@ -14,6 +16,9 @@ from cryptography.fernet import Fernet
 from fastapi import HTTPException
 
 from .config import settings
+
+
+logger = logging.getLogger(__name__)
 
 
 def platform_fee(amount_cents: int) -> int:
@@ -154,15 +159,17 @@ def verify_oauth_state(state: str) -> str:
     return user_id
 
 
-async def send_email(to: str | None, subject: str, html: str) -> None:
+async def send_email(to: str | None, subject: str, html: str) -> bool:
     if not to or not settings.resend_api_key or not settings.email_from:
-        return
+        return False
     async with httpx.AsyncClient(timeout=10) as client:
-        await client.post(
+        response = await client.post(
             "https://api.resend.com/emails",
             headers={"Authorization": f"Bearer {settings.resend_api_key}", "Content-Type": "application/json"},
             json={"from": settings.email_from, "to": [to], "subject": subject, "html": html},
         )
+    response.raise_for_status()
+    return True
 
 
 async def notify_user(user_id: str, kind: str, title: str, body: str, action_url: str = "") -> dict[str, Any]:
@@ -181,17 +188,25 @@ async def notify_user(user_id: str, kind: str, title: str, body: str, action_url
                     },
                 )
             email = response.json().get("email") if response.status_code < 400 else None
+            recipient = settings.email_test_recipient if settings.environment == "development" and settings.email_test_recipient else email
             await send_email(
-                email,
+                recipient,
                 title,
-                f"<h2>{title}</h2><p>{body}</p><p><a href='{settings.frontend_url}{action_url}'>Abrir CoachConnect</a></p>",
+                f"<h2>{escape(title)}</h2><p>{escape(body)}</p><p><a href='{settings.frontend_url.rstrip('/')}{escape(action_url, quote=True)}'>Abrir CoachConnect</a></p>",
             )
-        except (httpx.HTTPError, HTTPException):
-            pass
+        except (httpx.HTTPError, HTTPException) as exc:
+            logger.warning("No se pudo enviar la notificación por correo al usuario %s: %s", user_id, exc)
     return notification
 
 
-async def create_checkout(user_id: str, service_id: str, starts_at: datetime, notes: str, provider: str) -> dict[str, Any]:
+async def create_checkout(
+    user_id: str,
+    service_id: str,
+    starts_at: datetime,
+    notes: str,
+    provider: str,
+    frontend_url: str | None = None,
+) -> dict[str, Any]:
     services = await db.select("coach_services", id=f"eq.{service_id}", active="eq.true")
     if not services:
         raise HTTPException(404, "Servicio no encontrado")
@@ -221,6 +236,7 @@ async def create_checkout(user_id: str, service_id: str, starts_at: datetime, no
         return {"booking_id": booking["id"], "checkout_url": None, "status": "pending_payment"}
 
     stripe.api_key = settings.stripe_secret_key
+    return_url = (frontend_url or settings.frontend_url).rstrip("/")
     checkout_args: dict[str, Any] = {
         "mode": "payment",
         "line_items": [{
@@ -231,8 +247,8 @@ async def create_checkout(user_id: str, service_id: str, starts_at: datetime, no
                 "product_data": {"name": service["name"], "description": service.get("description") or "Sesión CoachConnect"},
             },
         }],
-        "success_url": f"{settings.frontend_url}/reservas?checkout=success&booking={booking['id']}",
-        "cancel_url": f"{settings.frontend_url}/entrenadores/{service['coach_id']}?checkout=cancelled",
+        "success_url": f"{return_url}/reservas?checkout=success&booking={booking['id']}",
+        "cancel_url": f"{return_url}/entrenadores/{service['coach_id']}?checkout=cancelled",
         "metadata": {"booking_id": booking["id"]},
     }
     stripe_account = coaches[0].get("stripe_account_id")
@@ -260,7 +276,7 @@ async def create_checkout(user_id: str, service_id: str, starts_at: datetime, no
     return {"booking_id": booking["id"], "checkout_url": session.url, "status": "pending_payment"}
 
 
-async def create_package_checkout(user_id: str, service_id: str) -> dict[str, Any]:
+async def create_package_checkout(user_id: str, service_id: str, frontend_url: str | None = None) -> dict[str, Any]:
     services = await db.select("coach_services", id=f"eq.{service_id}", active="eq.true")
     if not services:
         raise HTTPException(404, "Servicio no encontrado")
@@ -291,6 +307,7 @@ async def create_package_checkout(user_id: str, service_id: str) -> dict[str, An
         raise HTTPException(503, "Stripe no está configurado")
 
     stripe.api_key = settings.stripe_secret_key
+    return_url = (frontend_url or settings.frontend_url).rstrip("/")
     try:
         session = stripe.checkout.Session.create(
             mode="payment",
@@ -305,8 +322,8 @@ async def create_package_checkout(user_id: str, service_id: str) -> dict[str, An
                     },
                 },
             }],
-            success_url=f"{settings.frontend_url}/reservas?checkout=success&package={package['id']}",
-            cancel_url=f"{settings.frontend_url}/entrenadores/{service['coach_id']}?checkout=cancelled",
+            success_url=f"{return_url}/reservas?checkout=success&package={package['id']}",
+            cancel_url=f"{return_url}/entrenadores/{service['coach_id']}?checkout=cancelled",
             metadata={"package_id": package["id"]},
             payment_intent_data={
                 "application_fee_amount": platform_fee(service["price_cents"]),

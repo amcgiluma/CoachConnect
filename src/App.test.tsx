@@ -1,9 +1,11 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
+import { getCategoryGoalLabels } from './questionnaire'
 
 afterEach(() => {
   cleanup()
+  vi.restoreAllMocks()
   window.history.replaceState({}, '', '/')
 })
 
@@ -15,9 +17,59 @@ describe('CoachConnect', () => {
     expect(screen.getByRole('button', { name: /elegir qué quiero entrenar/i })).toBeInTheDocument()
     expect(screen.getByText(/online y presencial, con reserva desde la app/i)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /fitness & fuerza/i }))
-    expect(screen.getByRole('heading', { name: /qué disciplina encaja mejor/i })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: /qué tipo de entrenamiento buscas/i })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /musculación/i }))
-    expect(screen.getByRole('heading', { name: /qué quieres conseguir/i })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: /qué quieres conseguir con tu entrenamiento/i })).toBeInTheDocument()
+  })
+
+  it('adapts goals to each specialty instead of reusing fitness goals', () => {
+    expect(getCategoryGoalLabels('fitness', 'Musculación')).toContain('Aumentar masa muscular')
+    expect(getCategoryGoalLabels('fitness', 'Musculación')).not.toContain('Reducir grasa corporal')
+    expect(getCategoryGoalLabels('fitness', 'Pérdida de peso')).toContain('Reducir grasa corporal')
+    expect(getCategoryGoalLabels('fitness', 'Pérdida de peso')).not.toContain('Aumentar masa muscular')
+    expect(getCategoryGoalLabels('martial')).toEqual([
+      'Aprender desde cero',
+      'Mejorar técnica',
+      'Preparar un combate o grado',
+      'Aprender defensa personal',
+    ])
+    expect(getCategoryGoalLabels('dance')).not.toContain('Perder peso')
+
+    render(<App />)
+    fireEvent.click(screen.getByRole('button', { name: /danza & movimiento/i }))
+    fireEvent.click(screen.getByRole('button', { name: /danza urbana/i }))
+    expect(screen.getByRole('heading', { name: /qué buscas en tus clases/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /preparar una coreografía/i })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /perder peso/i })).not.toBeInTheDocument()
+  })
+
+  it('keeps the selected specialty image visible throughout the questionnaire', () => {
+    render(<App />)
+    fireEvent.click(screen.getByRole('button', { name: /artes marciales/i }))
+
+    const context = screen.getByLabelText(/especialidad elegida: artes marciales/i)
+    expect(context.querySelector('img')).toHaveAttribute('src', '/images/categories/martial.webp')
+    fireEvent.click(screen.getByRole('button', { name: /muay thai/i }))
+    expect(screen.getByText('Muay Thai', { selector: '.question-category-content > p' })).toBeInTheDocument()
+  })
+
+  it('accepts a verified Spanish location instead of a fixed city list', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ features: [{ properties: { osm_type: 'N', osm_id: 1, osm_key: 'place', name: 'Granada', state: 'Andalucía', countrycode: 'ES', type: 'city' } }] }),
+    } as Response)
+    render(<App />)
+    fireEvent.click(screen.getByRole('button', { name: /artes marciales/i }))
+    fireEvent.click(screen.getByRole('button', { name: /muay thai/i }))
+    fireEvent.click(screen.getByRole('button', { name: /mejorar técnica/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^presencial$/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^flexible$/i }))
+
+    const location = screen.getByLabelText(/ciudad, municipio, barrio o código postal/i)
+    fireEvent.change(location, { target: { value: 'Granada' } })
+    fireEvent.click(await screen.findByRole('option', { name: /granada.*andalucía/i }))
+    fireEvent.click(screen.getByRole('button', { name: /continuar con esta ubicación/i }))
+    expect(screen.getByRole('heading', { name: /qué presupuesto tienes/i })).toBeInTheDocument()
   })
 
   it('shows contextual symbols in the questionnaire options', () => {

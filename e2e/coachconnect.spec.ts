@@ -9,10 +9,11 @@ test('completa el cuestionario y llega a resultados', async ({ page }) => {
   await expect(page.getByRole('heading', { name: /encuentra tu próximo entrenador/i })).toBeVisible()
   await page.getByRole('button', { name: /fitness & fuerza/i }).click()
   await page.getByRole('button', { name: /musculación/i }).click()
+  await expect(page.getByRole('button', { name: /aumentar masa muscular/i })).toBeVisible()
+  await expect(page.getByRole('button', { name: /reducir grasa corporal/i })).toHaveCount(0)
   await page.getByRole('button', { name: /ganar fuerza/i }).click()
   await page.getByRole('button', { name: /online/i }).click()
   await page.getByRole('button', { name: /flexible/i }).click()
-  await page.getByRole('button', { name: /cualquier sitio/i }).click()
   await page.getByRole('button', { name: /flexible/i }).click()
   await page.getByRole('button', { name: /me da igual/i }).click()
   await page.getByRole('button', { name: /la mejor coincidencia/i }).click()
@@ -56,6 +57,37 @@ test('previsualiza con teclado y conserva accesible el contenido largo', async (
   await expect(page.getByRole('heading', { level: 2, name: /artes marciales/i })).toBeVisible()
   await expect(page.locator('.match-core-photo img')).toHaveAttribute('src', '/images/categories/martial.webp')
   await expect(page.getByRole('button', { name: /artes marciales/i })).toBeInViewport()
+})
+
+test('adapta los objetivos y acepta cualquier ubicación', async ({ page }) => {
+  await page.route('https://photon.komoot.io/api/**', async (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ features: [{ properties: { osm_type: 'N', osm_id: 1, osm_key: 'place', name: 'Granada', state: 'Andalucía', countrycode: 'ES', type: 'city' } }] }),
+  }))
+  await page.getByRole('button', { name: /artes marciales/i }).click()
+  await expect(page.getByLabel(/especialidad elegida: artes marciales/i).locator('img')).toHaveAttribute('src', '/images/categories/martial.webp')
+  await page.getByRole('button', { name: /muay thai/i }).click()
+  await expect(page.getByRole('heading', { name: /qué quieres conseguir con tu práctica/i })).toBeVisible()
+  await expect(page.getByRole('button', { name: /aprender defensa personal/i })).toBeVisible()
+  await expect(page.getByRole('button', { name: /perder peso/i })).toHaveCount(0)
+  await page.getByRole('button', { name: /mejorar técnica/i }).click()
+  await page.getByRole('button', { name: /^presencial$/i }).click()
+  await page.getByRole('button', { name: /^flexible$/i }).click()
+  await page.getByLabel(/ciudad, municipio, barrio o código postal/i).fill('Granada')
+  await page.getByRole('option', { name: /granada.*andalucía/i }).click()
+  await page.getByRole('button', { name: /continuar con esta ubicación/i }).click()
+  await expect(page.getByRole('heading', { name: /qué presupuesto tienes/i })).toBeVisible()
+})
+
+test('omite la ubicación cuando la modalidad es online', async ({ page }) => {
+  await page.getByRole('button', { name: /danza & movimiento/i }).click()
+  await page.getByRole('button', { name: /danza urbana/i }).click()
+  await page.getByRole('button', { name: /aprender desde cero/i }).click()
+  await page.getByRole('button', { name: /^online$/i }).click()
+  await page.getByRole('button', { name: /^flexible$/i }).click()
+  await expect(page.getByRole('heading', { name: /qué presupuesto tienes/i })).toBeVisible()
+  await expect(page.getByRole('heading', { name: /dónde quieres entrenar/i })).toHaveCount(0)
 })
 
 test('muestra fotografía humana sin perder los nombres de categoría', async ({ page }) => {

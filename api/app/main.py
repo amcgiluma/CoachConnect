@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, time as datetime_time, timedelta, timezone
+import logging
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -47,6 +48,9 @@ from .seed import CATEGORIES, COACHES
 from .services import create_checkout, create_package_checkout, db, exchange_oauth_code, notify_user, oauth_url, provision_meeting, storage_signed_url
 
 
+logger = logging.getLogger(__name__)
+
+
 app = FastAPI(
     title=settings.app_name,
     version="1.0.0",
@@ -61,6 +65,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def frontend_url_for_request(request: Request) -> str:
+    """Keep local Checkout redirects on the origin that owns the auth session."""
+    origin = request.headers.get("origin", "").rstrip("/")
+    if settings.environment in {"development", "test", "testing"} and origin in {
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    }:
+        return origin
+    return settings.frontend_url.rstrip("/")
 
 
 @app.get("/health", tags=["system"])
@@ -489,16 +504,28 @@ async def record_coach_video(payload: CoachVideoRequest, user: AuthUser = Depend
 
 
 @app.post("/api/v1/checkout", response_model=CheckoutResponse, tags=["payments"])
-async def checkout(payload: CheckoutRequest, user: AuthUser = Depends(current_user)) -> CheckoutResponse:
-    return CheckoutResponse(**await create_checkout(user.id, payload.service_id, payload.starts_at, payload.notes, payload.meeting_provider))
+async def checkout(payload: CheckoutRequest, request: Request, user: AuthUser = Depends(current_user)) -> CheckoutResponse:
+    return CheckoutResponse(
+        **await create_checkout(
+            user.id,
+            payload.service_id,
+            payload.starts_at,
+            payload.notes,
+            payload.meeting_provider,
+            frontend_url_for_request(request),
+        )
+    )
 
 
 @app.post("/api/v1/packages/checkout", response_model=PackageCheckoutResponse, tags=["payments"])
 async def package_checkout(
     payload: PackageCheckoutRequest,
+    request: Request,
     user: AuthUser = Depends(current_user),
 ) -> PackageCheckoutResponse:
-    return PackageCheckoutResponse(**await create_package_checkout(user.id, payload.service_id))
+    return PackageCheckoutResponse(
+        **await create_package_checkout(user.id, payload.service_id, frontend_url_for_request(request))
+    )
 
 
 @app.get("/api/v1/packages", tags=["bookings"])
@@ -569,10 +596,17 @@ async def create_review(booking_id: str, payload: ReviewCreateRequest, user: Aut
 
 @app.get("/api/v1/conversations", tags=["chat"])
 async def conversations(user: AuthUser = Depends(current_user)) -> list[dict[str, Any]]:
-    return await db.select(
-        "conversations", select="*,consumer:profiles!conversations_consumer_id_fkey(id,display_name),coach:profiles!conversations_coach_id_fkey(id,display_name)",
+    rows = await db.select(
+        "conversations",
         or_=f"(consumer_id.eq.{user.id},coach_id.eq.{user.id})", order="last_message_at.desc",
     )
+    participant_ids = sorted({participant_id for row in rows for participant_id in (row["consumer_id"], row["coach_id"])})
+    profiles = await db.select("profiles", select="id,display_name", id=f"in.({','.join(participant_ids)})") if participant_ids else []
+    profiles_by_id = {profile["id"]: profile for profile in profiles}
+    for row in rows:
+        row["consumer"] = profiles_by_id.get(row["consumer_id"])
+        row["coach"] = profiles_by_id.get(row["coach_id"])
+    return rows
 
 
 @app.post("/api/v1/conversations", tags=["chat"])
@@ -597,6 +631,7 @@ async def send_message(conversation_id: str, payload: MessageCreateRequest, user
     await assert_not_blocked(user.id, other_user_id)
     if payload.attachment_path and not payload.attachment_path.startswith(f"{conversation_id}/{user.id}/"):
         raise HTTPException(422, "La ruta del adjunto no pertenece a esta conversación")
+    existing_messages = await db.select("messages", select="id", conversation_id=f"eq.{conversation_id}", limit="1")
     row = await db.insert(
         "messages",
         {
@@ -607,8 +642,22 @@ async def send_message(conversation_id: str, payload: MessageCreateRequest, user
         },
     )
     await db.update("conversations", {"last_message_at": row["created_at"]}, id=f"eq.{conversation_id}")
-    recipient_id = other_user_id
-    await notify_user(recipient_id, "message", "Nuevo mensaje", payload.body[:120], f"/mensajes?conversation={conversation_id}")
+    sender_rows = await db.select("profiles", select="display_name", id=f"eq.{user.id}")
+    sender_name = sender_rows[0]["display_name"] if sender_rows else (user.email or "Alguien")
+    title = "Nueva conversación" if not existing_messages else "Nuevo mensaje"
+    preview = payload.body.strip()[:120] or "Te ha enviado un archivo."
+    try:
+        await notify_user(
+            other_user_id,
+            "conversation_started" if not existing_messages else "message",
+            title,
+            f"{sender_name}: {preview}",
+            f"/mensajes?conversation={conversation_id}",
+        )
+    except HTTPException as exc:
+        # El mensaje ya está guardado. Una incidencia de notificación no debe
+        # provocar que el cliente lo reenvíe y termine duplicándolo.
+        logger.warning("Mensaje %s guardado, pero la notificación falló: %s", row["id"], exc.detail)
     return row
 
 

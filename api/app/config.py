@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     platform_fee_percent: int = 15
     resend_api_key: str = ""
     email_from: str = ""
+    email_test_recipient: str = ""
     oauth_client_id: str = ""
     oauth_client_secret: str = ""
     oauth_redirect_uris: str = ""
@@ -26,7 +27,7 @@ class Settings(BaseSettings):
     google_oauth_url: str = "https://accounts.google.com/o/oauth2/v2/auth"
     demo_mode: bool = True
 
-    model_config = SettingsConfigDict(env_file=(".env", "api/.env"), extra="ignore")
+    model_config = SettingsConfigDict(env_file=(".env", "api/.env", "api/.env.local"), extra="ignore")
 
 
 settings = Settings()
