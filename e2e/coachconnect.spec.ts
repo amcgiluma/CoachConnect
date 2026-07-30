@@ -87,6 +87,16 @@ test('muestra fotografía humana sin perder los nombres de categoría', async ({
   await expect(page.getByRole('button', { name: /fitness & fuerza/i })).toBeVisible()
 })
 
+test('muestra un perfil público veraz y responsive', async ({ page }) => {
+  await page.goto('/entrenadores/ines-martin')
+
+  await expect(page.getByRole('heading', { name: 'Inés Martín' })).toBeVisible()
+  await expect(page.getByText(/4\.9 sobre 5 en 42 valoraciones/i)).toBeVisible()
+  await expect(page.getByText(/explica con claridad, escucha/i)).toHaveCount(0)
+  await expect(page.getByRole('link', { name: /eres entrenador/i })).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true)
+})
+
 test('el carrusel móvil avanza a una categoría exacta', async ({ page }, testInfo) => {
   test.skip(!testInfo.project.name.startsWith('mobile-'), 'Los controles de carrusel se muestran solo en móvil')
   await page.getByRole('button', { name: /categoría siguiente/i }).click()

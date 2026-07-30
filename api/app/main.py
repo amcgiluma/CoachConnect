@@ -203,7 +203,15 @@ def rank_coaches(
     return MatchResponse(items=[coach for _, coach, _ in eligible], relaxed_filter=relaxed_filter)
 
 
-async def remote_coaches() -> list[CoachSummary]:
+PUBLIC_COACH_SELECT = (
+    "user_id,headline,bio,city,mode,verification_status,responds_now,rating,review_count,"
+    "languages,preferred_video_provider,profiles(display_name,avatar_url),"
+    "coach_services(id,category_id,name,description,mode,duration_minutes,price_cents,package_size,active,"
+    "categories(id,slug,name_es,parent_id))"
+)
+
+
+async def remote_coaches(requested_category: str | None = None) -> list[CoachSummary]:
     if not db.ready:
         if settings.demo_mode and settings.environment in {"development", "test", "testing"}:
             return COACHES
@@ -211,22 +219,30 @@ async def remote_coaches() -> list[CoachSummary]:
     try:
         rows = await db.select(
             "coach_profiles",
-            select="*,profiles(display_name,avatar_url),coach_services(*,categories(slug,name_es))",
-            verification_status="in.(credentials_submitted,under_review,verified)",
+            select=PUBLIC_COACH_SELECT,
+            verification_status="eq.verified",
         )
+        category_rows = await db.select("categories", select="id,slug,parent_id", active="eq.true")
+        categories_by_id = {item["id"]: item for item in category_rows}
+
+        def root_category_slug(service: dict[str, Any]) -> str:
+            category = service.get("categories") or {}
+            parent = categories_by_id.get(category.get("parent_id"))
+            return (parent or category).get("slug", "fitness")
+
         result: list[CoachSummary] = []
         for row in rows:
             services = [item for item in row.get("coach_services", []) if item.get("active")]
             if not services:
                 continue
-            primary = min(services, key=lambda item: item["price_cents"])
-            category = primary.get("categories") or {}
+            compatible_services = [item for item in services if root_category_slug(item) == requested_category]
+            primary = min(compatible_services or services, key=lambda item: item["price_cents"])
             result.append(CoachSummary(
                 id=row["user_id"],
                 name=(row.get("profiles") or {}).get("display_name", "Entrenador CoachConnect"),
                 avatar_url=(row.get("profiles") or {}).get("avatar_url"),
                 specialty=row["headline"] or primary["name"],
-                category=category.get("slug", "fitness"),
+                category=root_category_slug(primary),
                 mode=row["mode"],
                 city=row.get("city") or "Online",
                 rating=float(row["rating"]),
@@ -248,7 +264,7 @@ async def remote_coaches() -> list[CoachSummary]:
 
 @app.post("/api/v1/matching/search", response_model=MatchResponse, tags=["matching"])
 async def match_coaches(request: MatchRequest) -> MatchResponse:
-    return rank_coaches(await remote_coaches(), request)
+    return rank_coaches(await remote_coaches(request.category), request)
 
 
 @app.get("/api/v1/coaches/{coach_id}", tags=["catalog"])
@@ -256,14 +272,12 @@ async def coach_detail(coach_id: str) -> dict[str, Any]:
     if db.ready:
         rows = await db.select(
             "coach_profiles",
-            select="*,profiles(display_name,avatar_url),coach_services(*,categories(slug,name_es)),availability_rules(*)",
+            select=PUBLIC_COACH_SELECT,
             user_id=f"eq.{coach_id}",
-            verification_status="in.(credentials_submitted,under_review,verified)",
+            verification_status="eq.verified",
         )
         if rows:
             rows[0]["coach_services"] = [service for service in rows[0].get("coach_services", []) if service.get("active")]
-            if rows[0].get("video_status") != "approved":
-                rows[0]["video_path"] = None
             return rows[0]
     demo = next((coach for coach in COACHES if coach.id == coach_id), None)
     if not demo:
@@ -362,7 +376,11 @@ async def coach_onboarding(payload: CoachOnboardingRequest, user: AuthUser = Dep
 
 @app.get("/api/v1/coach/profile", tags=["coach"])
 async def my_coach_profile(user: AuthUser = Depends(current_user)) -> dict[str, Any]:
-    rows = await db.select("coach_profiles", select="*,profiles(display_name,avatar_url)", user_id=f"eq.{user.id}")
+    rows = await db.select(
+        "coach_profiles",
+        select="*,profiles(display_name,avatar_url),coach_services(*,categories(slug,name_es)),availability_rules(*)",
+        user_id=f"eq.{user.id}",
+    )
     if not rows:
         raise HTTPException(404, "Perfil profesional no encontrado")
     return rows[0]
@@ -375,7 +393,7 @@ async def create_service(payload: ServiceCreateRequest, user: AuthUser = Depends
 
 @app.get("/api/v1/coach/services", tags=["coach"])
 async def my_services(user: AuthUser = Depends(current_user)) -> list[dict[str, Any]]:
-    return await db.select("coach_services", coach_id=f"eq.{user.id}", order="name.asc")
+    return await db.select("coach_services", coach_id=f"eq.{user.id}", active="eq.true", order="name.asc")
 
 
 @app.put("/api/v1/coach/services/{service_id}", tags=["coach"])
@@ -404,6 +422,35 @@ async def my_availability(user: AuthUser = Depends(current_user)) -> dict[str, l
     return {
         "rules": await db.select("availability_rules", coach_id=f"eq.{user.id}", order="weekday.asc"),
         "exceptions": await db.select("availability_exceptions", coach_id=f"eq.{user.id}", order="starts_at.asc"),
+    }
+
+
+@app.get("/api/v1/coach/calendar", tags=["coach"])
+async def coach_calendar(
+    date_from: datetime = Query(alias="from"),
+    date_to: datetime = Query(alias="to"),
+    user: AuthUser = Depends(current_user),
+) -> dict[str, list[dict[str, Any]]]:
+    if date_to <= date_from:
+        raise HTTPException(422, "El final del calendario debe ser posterior al inicio")
+    if date_to - date_from > timedelta(days=62):
+        raise HTTPException(422, "El rango del calendario no puede superar 62 días")
+    return {
+        "bookings": await db.select(
+            "bookings",
+            select="*,coach_services(name,duration_minutes),profiles(display_name)",
+            coach_id=f"eq.{user.id}",
+            starts_at=f"lt.{date_to.isoformat()}",
+            ends_at=f"gt.{date_from.isoformat()}",
+            order="starts_at.asc",
+        ),
+        "exceptions": await db.select(
+            "availability_exceptions",
+            coach_id=f"eq.{user.id}",
+            starts_at=f"lt.{date_to.isoformat()}",
+            ends_at=f"gt.{date_from.isoformat()}",
+            order="starts_at.asc",
+        ),
     }
 
 
@@ -455,8 +502,15 @@ async def set_responds_now(payload: RespondsNowRequest, user: AuthUser = Depends
 async def record_credential(payload: CredentialCreateRequest, user: AuthUser = Depends(current_user)) -> dict[str, Any]:
     if not payload.storage_path.startswith(f"{user.id}/"):
         raise HTTPException(422, "La ruta del documento no pertenece al usuario")
+    profiles = await db.select("coach_profiles", select="verification_status", user_id=f"eq.{user.id}")
+    if not profiles:
+        raise HTTPException(404, "Completa primero tu perfil profesional")
+    current_status = profiles[0]["verification_status"]
+    if current_status == "suspended":
+        raise HTTPException(409, "El equipo de CoachConnect debe revisar un perfil suspendido")
     row = await db.insert("credential_documents", {"coach_id": user.id, **payload.model_dump()})
-    await db.update("coach_profiles", {"verification_status": "credentials_submitted"}, user_id=f"eq.{user.id}")
+    if current_status in {"draft", "rejected"}:
+        await db.update("coach_profiles", {"verification_status": "credentials_submitted"}, user_id=f"eq.{user.id}")
     return row
 
 
@@ -532,7 +586,7 @@ async def book_with_package(
 async def bookings(user: AuthUser = Depends(current_user)) -> list[dict[str, Any]]:
     return await db.select(
         "bookings",
-        select="*,coach_services(name,duration_minutes),coach_profiles(headline,profiles(display_name))",
+        select="*,coach_services(name,duration_minutes),coach_profiles(headline,profiles(display_name)),profiles(display_name)",
         or_=f"(consumer_id.eq.{user.id},coach_id.eq.{user.id})",
         order="starts_at.desc",
     )
