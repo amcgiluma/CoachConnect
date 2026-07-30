@@ -3,10 +3,10 @@ import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate,
 import { useTranslation } from 'react-i18next'
 import { Toaster, toast } from 'sonner'
 import {
-  ArrowLeft, ArrowRight, BadgeCheck, Bell, CalendarDays, Check, ChevronDown, CircleDollarSign,
+  ArrowLeft, ArrowRight, BadgeCheck, Bell, CalendarDays, Check, ChevronDown,
   Clock3, CreditCard, FileCheck2, Globe2, Languages, LayoutDashboard, LoaderCircle,
   LogOut, MapPin, MessageCircle, Paperclip, Send, Settings2, ShieldCheck, SlidersHorizontal,
-  Sparkles, Star, Target, Upload, UserRound, Video, X, Zap,
+  Sparkles, Star, Upload, UserRound, Video, X, Zap,
 } from 'lucide-react'
 import { AuthProvider, useAuth } from './auth'
 import { AuthModal } from './components/AuthModal'
@@ -107,10 +107,15 @@ function Home() {
     if (step > 0) window.scrollTo({ top: 0, behavior: 'auto' })
   }, [step])
   const begin = (item: Category) => { setCategory(item); setAnswers({ category: item.id }); setStep(1) }
-  const answer = (key: string, value: string) => { setAnswers((current) => ({ ...current, [key]: value })); setStep((current) => current + 1) }
-  const finish = (priority: string) => {
-    const search = new URLSearchParams({ ...answers, priority })
+  const finish = (completedAnswers: Record<string, string>) => {
+    const search = new URLSearchParams(completedAnswers)
     navigate(`/buscar?${search}`)
+  }
+  const answer = (key: string, value: string) => {
+    const completedAnswers = { ...answers, [key]: value }
+    const completedSteps = category ? getQuestionnaireSteps(category, completedAnswers) : []
+    if (step >= completedSteps.length) finish(completedAnswers)
+    else { setAnswers(completedAnswers); setStep((current) => current + 1) }
   }
   const displayCategories = categories.map((item) => ({
     ...item,
@@ -157,9 +162,9 @@ function Home() {
         status: t('home.stage.status'),
         specialty: t('home.stage.specialty'),
         criteria: t('home.stage.criteria'),
-        goal: t('home.stage.goal'),
-        mode: t('home.stage.mode'),
-        availability: t('home.stage.availability'),
+        location: t('home.stage.location'),
+        rating: t('home.stage.rating'),
+        response: t('home.stage.response'),
         ready: t('home.stage.ready'),
         action: t('home.stage.action'),
       }}
@@ -185,15 +190,15 @@ function Home() {
   const steps = getQuestionnaireSteps(category, answers)
   const current = steps[step - 1]
   return <section className="question-screen" aria-labelledby="question-title">
-    <div className="question-progress"><span>02 — Afinemos la búsqueda</span><div><i style={{ width: `${Math.min(100, step / (steps.length + 1) * 100)}%` }} /></div><b>{String(step).padStart(2, '0')}<small>/{String(steps.length + 1).padStart(2, '0')}</small></b></div>
+    <div className="question-progress"><span>02 — Afinemos la búsqueda</span><div><i style={{ width: `${Math.min(100, step / steps.length * 100)}%` }} /></div><b>{String(step).padStart(2, '0')}<small>/{String(steps.length).padStart(2, '0')}</small></b></div>
     <div className="question-layout">
-      <QuestionnaireContext category={category} answers={answers} step={step} total={steps.length + 1} onChange={() => setStep(0)} />
+      <QuestionnaireContext category={category} answers={answers} step={step} total={steps.length} onChange={() => setStep(0)} />
       <div className="question-wrap"><button type="button" className="back-link" onClick={() => setStep(Math.max(0, step - 1))}><ArrowLeft /> Atrás</button>
         {current?.kind === 'location'
           ? <LocationQuestion title={current.title} initialValue={answers.city} onSelect={(value) => answer(current.key, value)} />
           : current
             ? <Question title={current.title} options={current.options} onSelect={(value) => answer(current.key, value)} />
-            : <div className="final-question"><p className="eyebrow">Casi listo</p><h2 id="question-title">¿Qué pesa más para ti?</h2><p className="question-intro">Usaremos tu respuesta para ordenar los resultados, no para encerrarte en un filtro.</p><div className="option-list">{([{ label: 'La mejor coincidencia', icon: Target }, { label: 'Que responda ahora', icon: Zap }, { label: 'La experiencia y las reseñas', icon: Star }, { label: 'El precio', icon: CircleDollarSign }] as QuestionnaireOption[]).map((option, index) => <OptionButton key={option.label} option={option} index={index} onSelect={() => finish(option.label)} />)}</div></div>}
+            : null}
       </div>
     </div>
   </section>
@@ -347,25 +352,20 @@ function Results() {
   const [loading, setLoading] = useState(true)
   const [relaxedFilter, setRelaxedFilter] = useState<string | null>(null)
   const [mode, setMode] = useState<'all' | 'online' | 'presencial'>(requestedOnline ? 'online' : 'all')
-  const [sort, setSort] = useState(search.get('priority')?.includes('precio') ? 'price' : 'match')
+  const [sort, setSort] = useState('match')
   const [mapOpen, setMapOpen] = useState(false)
   const category = search.get('category') || 'fitness'
   useEffect(() => {
     const rawMode = search.get('mode')
     const rawBudget = search.get('budget')
-    const rawPriority = search.get('priority') || ''
-    const priority = rawPriority.includes('precio') ? 'price' : rawPriority.includes('reseñas') ? 'rating' : rawPriority.includes('responda') ? 'availability' : 'match'
     const language = search.get('language')
     const payload = {
       category,
       subcategory: search.get('subcategory'),
-      goal: search.get('goal'),
       city: search.get('city')?.startsWith('Cualquier') ? undefined : search.get('city'),
-      availability: search.get('availability'),
       mode: requestedOnline || rawMode === 'Online' ? 'online' : rawMode === 'Presencial' ? 'presencial' : undefined,
       max_price: rawBudget?.startsWith('Hasta') ? Number(rawBudget.match(/\d+/)?.[0]) : undefined,
       languages: language === 'Español' ? ['es'] : language === 'Inglés' ? ['en'] : [],
-      priority,
     }
     api<MatchApiResponse>('/api/v1/matching/search', { method: 'POST', body: JSON.stringify(payload) })
       .then((data) => { setItems(data.items.map(fallbackCoach)); setRelaxedFilter(data.relaxed_filter) })
@@ -378,10 +378,22 @@ function Results() {
   }, [category, requestedOnline, search])
   const shown = useMemo(() => {
     const filtered = items.filter((coach) => (mode === 'all' || coach.mode === mode || coach.mode === 'hibrido') && (coach.category === category || !items.some((item) => item.category === category)))
-    return [...filtered].sort((a, b) => sort === 'price' ? a.price - b.price : sort === 'rating' ? b.rating - a.rating : sort === 'availability' ? Number(b.onlineNow) - Number(a.onlineNow) : Number(b.category === category) * 65 - Number(a.category === category) * 65 || b.rating - a.rating)
-  }, [items, mode, sort, category])
+    const requestedSubcategory = search.get('subcategory')?.toLocaleLowerCase('es') || ''
+    const requestedCity = search.get('city')?.toLocaleLowerCase('es') || ''
+    return [...filtered].sort((a, b) => {
+      if (sort === 'price') return a.price - b.price
+      if (sort === 'rating') return b.rating - a.rating || b.reviews - a.reviews
+      if (sort === 'availability') return Number(b.onlineNow) - Number(a.onlineNow)
+      const specialtyDifference = Number(b.category === category) - Number(a.category === category)
+        || Number(Boolean(requestedSubcategory) && [b.specialty, ...b.tags].some((value) => value.toLocaleLowerCase('es').includes(requestedSubcategory)))
+          - Number(Boolean(requestedSubcategory) && [a.specialty, ...a.tags].some((value) => value.toLocaleLowerCase('es').includes(requestedSubcategory)))
+      const locationDifference = Number(Boolean(requestedCity) && b.city.toLocaleLowerCase('es') === requestedCity)
+        - Number(Boolean(requestedCity) && a.city.toLocaleLowerCase('es') === requestedCity)
+      return specialtyDifference || locationDifference || b.rating - a.rating || b.reviews - a.reviews || Number(b.onlineNow) - Number(a.onlineNow)
+    })
+  }, [items, mode, sort, category, search])
   const label = categories.find((item) => item.id === category)?.label || 'Entrenadores'
-  return <section className="results-screen"><div className="results-head"><Link className="back-link" to="/"><ArrowLeft /> Cambiar búsqueda</Link><div className="results-title"><div><p className="eyebrow">Tu búsqueda</p><h1>{label}<span> que encajan contigo.</span></h1></div><div className="result-count"><strong>{shown.length}</strong><small>coincidencias<br />encontradas</small></div></div><div className="answer-pills"><span><b>Especialidad</b>{label}</span>{search.get('goal') && <span><b>Objetivo</b>{search.get('goal')}</span>}{search.get('city') && <span><b>Zona</b>{search.get('city')}</span>}</div></div>
+  return <section className="results-screen"><div className="results-head"><Link className="back-link" to="/"><ArrowLeft /> Cambiar búsqueda</Link><div className="results-title"><div><p className="eyebrow">Tu búsqueda</p><h1>{label}<span> que encajan contigo.</span></h1></div><div className="result-count"><strong>{shown.length}</strong><small>coincidencias<br />encontradas</small></div></div><div className="answer-pills"><span><b>Especialidad</b>{label}</span>{search.get('city') && <span><b>Zona</b>{search.get('city')}</span>}</div></div>
     <div className="results-toolbar"><div className="mode-tabs">{([['all', 'Todos'], ['online', 'Online'], ['presencial', 'Presencial']] as const).map(([value, text]) => <button key={value} className={mode === value ? 'active' : ''} onClick={() => setMode(value)}>{text}</button>)}</div><div className="toolbar-right"><label className="select-wrap"><span>Ordenar</span><select value={sort} onChange={(event) => setSort(event.target.value)}><option value="match">Mejor coincidencia</option><option value="availability">Disponibilidad</option><option value="rating">Reputación</option><option value="price">Precio</option></select><ChevronDown /></label><button className={`map-toggle ${mapOpen ? 'active' : ''}`} onClick={() => setMapOpen(!mapOpen)}><MapPin /> {mapOpen ? 'Ocultar mapa' : 'Ver mapa'}</button></div></div>
     {relaxedFilter && <div className="match-notice"><Sparkles /><span>No encontramos una coincidencia completa. Hemos relajado <strong>{relaxedFilter}</strong> para enseñarte la alternativa más cercana.</span></div>}
     <div className={`results-layout ${mapOpen ? 'with-map' : ''}`}><div className="coach-list">{loading && <LoadingBlock label="Buscando el mejor encaje" />}{!loading && shown.map((coach, index) => <CoachCard key={coach.id} coach={coach} rank={index + 1} onClick={() => navigate(`/entrenadores/${coach.id}`, { state: { coach } })} />)}{!loading && !shown.length && <div className="empty-state"><Sparkles /><h2>Podemos abrir un poco la búsqueda.</h2><p>Prueba con otra modalidad o zona.</p></div>}</div>{mapOpen && <Suspense fallback={<LoadingBlock label="Cargando mapa" />}><CoachMap coaches={shown} onCoach={(coach) => navigate(`/entrenadores/${coach.id}`, { state: { coach } })} /></Suspense>}</div>
@@ -708,7 +720,6 @@ function Admin() {
   const [catalog, setCatalog] = useState<any[]>([])
   const [bookings, setBookings] = useState<any[]>([])
   const [payments, setPayments] = useState<any[]>([])
-  const [weights, setWeights] = useState<any | null>(null)
   const [tab, setTab] = useState('validation')
   useEffect(() => {
     if (!user) return
@@ -722,7 +733,6 @@ function Admin() {
         api<any[]>('/api/v1/admin/categories').then(setCatalog),
         api<any[]>('/api/v1/admin/bookings').then(setBookings),
         api<any[]>('/api/v1/admin/payments').then(setPayments),
-        api('/api/v1/admin/matching-settings').then(setWeights).catch(() => undefined),
       ])
     }).catch(() => undefined)
   }, [user])
@@ -732,8 +742,7 @@ function Admin() {
   const reviewVideo = async (coachId: string, status: 'approved' | 'rejected') => { await api(`/api/v1/admin/videos/${coachId}`, { method: 'PATCH', body: JSON.stringify({ status, note: '' }) }); setVideos((items) => items.filter((item) => item.user_id !== coachId)) }
   const resolveReport = async (id: string) => { await api(`/api/v1/admin/reports/${id}?status_value=resolved`, { method: 'PATCH' }); setReports((items) => items.filter((item) => item.id !== id)) }
   const createCategory = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const form = new FormData(event.currentTarget); const payload = { slug: form.get('slug'), name_es: form.get('name_es'), name_en: form.get('name_en'), sort_order: Number(form.get('sort_order')), active: true }; try { const row = await api('/api/v1/admin/categories', { method: 'POST', body: JSON.stringify(payload) }); setCatalog((items) => [...items, row]); event.currentTarget.reset() } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo crear') } }
-  const saveWeights = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const form = new FormData(event.currentTarget); const payload = Object.fromEntries(['specialty_weight', 'goal_weight', 'mode_weight', 'availability_weight', 'reputation_weight'].map((key) => [key, Number(form.get(key))])); try { const row = await api('/api/v1/admin/matching-settings', { method: 'PUT', body: JSON.stringify(payload) }); setWeights(row); toast.success('Pesos actualizados') } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo guardar') } }
-  return <section className="admin-screen"><p className="eyebrow">CoachConnect Ops</p><h1>Operaciones.</h1><div className="admin-tabs">{[['validation', 'Validación'], ['moderation', 'Moderación'], ['catalog', 'Taxonomía'], ['matching', 'Matching'], ['business', 'Reservas y pagos']].map(([key, label]) => <button className={tab === key ? 'active' : ''} onClick={() => setTab(key)} key={key}>{label}</button>)}</div>{tab === 'validation' && <><h2>Documentación profesional</h2><div className="admin-list">{docs.map((item) => <article key={item.id}><FileCheck2 /><div><strong>{item.title}</strong><span>{item.status} · {new Date(item.created_at).toLocaleDateString('es-ES')}</span></div><div><button onClick={() => openPrivate(`/api/v1/admin/credentials/${item.id}/download`)}>Abrir</button><button onClick={() => reviewCoach(item.coach_id, 'verified')}>Aprobar</button><button onClick={() => reviewCoach(item.coach_id, 'rejected')}>Rechazar</button></div></article>)}</div><h2>Vídeos pendientes</h2><div className="admin-list">{videos.map((item) => <article key={item.user_id}><Video /><div><strong>{item.profiles?.display_name || 'Entrenador'}</strong><span>Vídeo promocional pendiente</span></div><div><button onClick={() => openPrivate(`/api/v1/admin/videos/${item.user_id}/download`)}>Abrir</button><button onClick={() => reviewVideo(item.user_id, 'approved')}>Aprobar</button><button onClick={() => reviewVideo(item.user_id, 'rejected')}>Rechazar</button></div></article>)}</div></>}{tab === 'moderation' && <div className="admin-list">{reports.map((item) => <article key={item.id}><ShieldCheck /><div><strong>{item.reason}</strong><span>{item.details || 'Sin detalle'} · {item.status}</span></div><div><button onClick={() => resolveReport(item.id)}>Resolver</button></div></article>)}</div>}{tab === 'catalog' && <><form className="admin-form" onSubmit={createCategory}><input name="slug" placeholder="slug" required /><input name="name_es" placeholder="Nombre ES" required /><input name="name_en" placeholder="Name EN" required /><input name="sort_order" type="number" defaultValue="100" /><Button type="submit">Crear categoría</Button></form><div className="compact-list">{catalog.map((item) => <div key={item.id}><strong>{item.name_es}</strong><span>{item.name_en} · {item.slug}</span></div>)}</div></>}{tab === 'matching' && weights && <form className="admin-form weights-form" onSubmit={saveWeights}>{[['specialty_weight', 'Especialidad'], ['goal_weight', 'Objetivo'], ['mode_weight', 'Modalidad'], ['availability_weight', 'Disponibilidad'], ['reputation_weight', 'Reputación']].map(([key, label]) => <label key={key}>{label}<input name={key} type="number" min="0" max="100" defaultValue={weights[key]} /></label>)}<Button type="submit">Guardar pesos</Button></form>}{tab === 'business' && <div className="metric-grid"><div><span>Reservas</span><strong>{bookings.length}</strong><small>{bookings.filter((item) => item.status === 'confirmed').length} confirmadas</small></div><div><span>Volumen pagado</span><strong>{(payments.filter((item) => item.status === 'paid').reduce((sum, item) => sum + item.amount_cents, 0) / 100).toFixed(0)} €</strong><small>{payments.length} pagos</small></div><div><span>Comisión</span><strong>{(payments.filter((item) => item.status === 'paid').reduce((sum, item) => sum + item.platform_fee_cents, 0) / 100).toFixed(0)} €</strong><small>Ingresos de plataforma</small></div></div>}</section>
+  return <section className="admin-screen"><p className="eyebrow">CoachConnect Ops</p><h1>Operaciones.</h1><div className="admin-tabs">{[['validation', 'Validación'], ['moderation', 'Moderación'], ['catalog', 'Taxonomía'], ['matching', 'Matching'], ['business', 'Reservas y pagos']].map(([key, label]) => <button className={tab === key ? 'active' : ''} onClick={() => setTab(key)} key={key}>{label}</button>)}</div>{tab === 'validation' && <><h2>Documentación profesional</h2><div className="admin-list">{docs.map((item) => <article key={item.id}><FileCheck2 /><div><strong>{item.title}</strong><span>{item.status} · {new Date(item.created_at).toLocaleDateString('es-ES')}</span></div><div><button onClick={() => openPrivate(`/api/v1/admin/credentials/${item.id}/download`)}>Abrir</button><button onClick={() => reviewCoach(item.coach_id, 'verified')}>Aprobar</button><button onClick={() => reviewCoach(item.coach_id, 'rejected')}>Rechazar</button></div></article>)}</div><h2>Vídeos pendientes</h2><div className="admin-list">{videos.map((item) => <article key={item.user_id}><Video /><div><strong>{item.profiles?.display_name || 'Entrenador'}</strong><span>Vídeo promocional pendiente</span></div><div><button onClick={() => openPrivate(`/api/v1/admin/videos/${item.user_id}/download`)}>Abrir</button><button onClick={() => reviewVideo(item.user_id, 'approved')}>Aprobar</button><button onClick={() => reviewVideo(item.user_id, 'rejected')}>Rechazar</button></div></article>)}</div></>}{tab === 'moderation' && <div className="admin-list">{reports.map((item) => <article key={item.id}><ShieldCheck /><div><strong>{item.reason}</strong><span>{item.details || 'Sin detalle'} · {item.status}</span></div><div><button onClick={() => resolveReport(item.id)}>Resolver</button></div></article>)}</div>}{tab === 'catalog' && <><form className="admin-form" onSubmit={createCategory}><input name="slug" placeholder="slug" required /><input name="name_es" placeholder="Nombre ES" required /><input name="name_en" placeholder="Name EN" required /><input name="sort_order" type="number" defaultValue="100" /><Button type="submit">Crear categoría</Button></form><div className="compact-list">{catalog.map((item) => <div key={item.id}><strong>{item.name_es}</strong><span>{item.name_en} · {item.slug}</span></div>)}</div></>}{tab === 'matching' && <><h2>Orden de matching</h2><div className="compact-list">{['1. Especialidad', '2. Zona indicada', '3. Valoraciones', '4. Rapidez de respuesta'].map((criterion) => <div key={criterion}><strong>{criterion}</strong><span>Prioridad fija</span></div>)}</div></>}{tab === 'business' && <div className="metric-grid"><div><span>Reservas</span><strong>{bookings.length}</strong><small>{bookings.filter((item) => item.status === 'confirmed').length} confirmadas</small></div><div><span>Volumen pagado</span><strong>{(payments.filter((item) => item.status === 'paid').reduce((sum, item) => sum + item.amount_cents, 0) / 100).toFixed(0)} €</strong><small>{payments.length} pagos</small></div><div><span>Comisión</span><strong>{(payments.filter((item) => item.status === 'paid').reduce((sum, item) => sum + item.platform_fee_cents, 0) / 100).toFixed(0)} €</strong><small>Ingresos de plataforma</small></div></div>}</section>
 }
 
 function AuthRequired({ onAuth, title, coach = false }: { onAuth: () => void; title: string; coach?: boolean }) {

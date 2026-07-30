@@ -16,9 +16,9 @@ type HomeMatchStageProps = {
     status: string
     specialty: string
     criteria: string
-    goal: string
-    mode: string
-    availability: string
+    location: string
+    rating: string
+    response: string
     ready: string
     action: string
   }
@@ -88,7 +88,7 @@ export function HomeMatchStage({
       <footer className="match-criteria">
         <div className="match-criteria-title"><SlidersHorizontal aria-hidden="true" /><span>{labels.criteria}</span></div>
         <div className="match-criteria-grid">
-          {[labels.specialty, labels.goal, labels.mode, labels.availability].map((label, index) => (
+          {[labels.specialty, labels.location, labels.rating, labels.response].map((label, index) => (
             <span className={index === 0 ? 'is-active' : ''} key={label}>
               {index === 0 ? <Check aria-hidden="true" /> : `0${index + 1}`}
               <small>{label}</small>

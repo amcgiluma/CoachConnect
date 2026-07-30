@@ -7,7 +7,7 @@ from starlette.requests import Request
 
 import app.main as main_module
 from app.main import app
-from app.schemas import AuthUser, MessageCreateRequest
+from app.schemas import AuthUser, CoachSummary, MatchRequest, MessageCreateRequest, ServiceMode
 
 client = TestClient(app)
 
@@ -30,7 +30,7 @@ class DemoDatabase:
 
 def test_matching_prioritises_selected_category(monkeypatch) -> None:
     monkeypatch.setattr(main_module, "db", DemoDatabase())
-    response = client.post("/api/v1/matching/search", json={"category": "martial", "city": "Madrid", "availability": "ahora"})
+    response = client.post("/api/v1/matching/search", json={"category": "martial", "city": "Madrid"})
     assert response.status_code == 200
     assert response.json()["items"][0]["id"] == "marcos-sanz"
 
@@ -39,11 +39,46 @@ def test_matching_applies_budget_as_eligibility_filter(monkeypatch) -> None:
     monkeypatch.setattr(main_module, "db", DemoDatabase())
     response = client.post(
         "/api/v1/matching/search",
-        json={"category": "running", "max_price": 25, "priority": "price"},
+        json={"category": "running", "max_price": 25},
     )
     assert response.status_code == 200
     assert response.json()["items"]
     assert all(item["price_from"] <= 25 for item in response.json()["items"])
+
+
+def test_matching_uses_fixed_rating_then_response_order() -> None:
+    def coach(coach_id: str, *, rating: float, reviews: int, responds_now: bool) -> CoachSummary:
+        return CoachSummary(
+            id=coach_id,
+            name=coach_id,
+            specialty="Muay Thai",
+            category="martial",
+            mode=ServiceMode.in_person,
+            city="Madrid",
+            rating=rating,
+            reviews=reviews,
+            price_from=30,
+            next_slot="Mañana",
+            responds_now=responds_now,
+            verified=True,
+        )
+
+    result = main_module.rank_coaches(
+        [
+            coach("fast-lower-rating", rating=4.8, reviews=100, responds_now=True),
+            coach("slow-best-rating", rating=5.0, reviews=20, responds_now=False),
+            coach("slow-tie", rating=4.9, reviews=30, responds_now=False),
+            coach("fast-tie", rating=4.9, reviews=30, responds_now=True),
+        ],
+        MatchRequest(category="martial", subcategory="Muay Thai", city="Madrid"),
+    )
+
+    assert [item.id for item in result.items] == [
+        "slow-best-rating",
+        "fast-tie",
+        "slow-tie",
+        "fast-lower-rating",
+    ]
 
 
 def test_protected_routes_require_a_bearer_token() -> None:

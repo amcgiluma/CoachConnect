@@ -20,13 +20,10 @@ class Category(BaseModel):
 class MatchRequest(BaseModel):
     category: str
     subcategory: str | None = None
-    goal: str | None = None
     mode: ServiceMode | None = None
     city: str | None = None
-    availability: str | None = None
     max_price: float | None = Field(default=None, gt=0)
     languages: list[str] = Field(default_factory=list)
-    priority: str = "match"
 
 
 class CoachSummary(BaseModel):
@@ -167,27 +164,6 @@ class ReportCreateRequest(BaseModel):
 
 class BlockUserRequest(BaseModel):
     user_id: str
-
-
-class MatchingSettingsRequest(BaseModel):
-    specialty_weight: int = Field(default=65, ge=0, le=100)
-    goal_weight: int = Field(default=10, ge=0, le=100)
-    mode_weight: int = Field(default=10, ge=0, le=100)
-    availability_weight: int = Field(default=10, ge=0, le=100)
-    reputation_weight: int = Field(default=5, ge=0, le=100)
-
-    @model_validator(mode="after")
-    def validate_total(self):
-        total = (
-            self.specialty_weight
-            + self.goal_weight
-            + self.mode_weight
-            + self.availability_weight
-            + self.reputation_weight
-        )
-        if total != 100:
-            raise ValueError("Los pesos de matching deben sumar 100")
-        return self
 
 
 class CategoryWriteRequest(BaseModel):

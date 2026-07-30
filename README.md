@@ -1,6 +1,6 @@
 # CoachConnect
 
-MVP de un marketplace bilingüe de entrenadores personales. La experiencia de consumidor empieza con un cuestionario interactivo que prioriza la especialidad, la disponibilidad y el encaje real antes de mostrar perfiles.
+MVP de un marketplace bilingüe de entrenadores personales. La experiencia de consumidor empieza con un cuestionario interactivo que prioriza la especialidad, la zona y el encaje real antes de mostrar perfiles.
 
 El alcance funcional completo y las decisiones de producto están guardados en [PLAN_COACHCONNECT_MVP.md](./PLAN_COACHCONNECT_MVP.md).
 
@@ -8,8 +8,8 @@ El alcance funcional completo y las decisiones de producto están guardados en [
 
 La implementación cubre:
 
-- Cuestionario de matching con especialidad, objetivo, modalidad, horario, zona, presupuesto, idioma y prioridad.
-- Ranking explicable con pesos administrables y relajación controlada de un criterio.
+- Cuestionario de matching con especialidad, modalidad, zona, presupuesto e idioma.
+- Ranking explicable con orden fijo —especialidad, zona, valoraciones y rapidez de respuesta— y relajación controlada de un criterio.
 - Perfiles, agenda real, excepciones, reservas transaccionales sin solapes, cancelaciones, reseñas y bonos.
 - Auth Email/Google/Apple, mensajería Realtime, adjuntos privados, bloqueos, denuncias y notificaciones web/email.
 - Portal profesional con onboarding, servicios, agenda, acreditaciones, vídeo, Stripe Connect y videollamadas.

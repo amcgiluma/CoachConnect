@@ -4,7 +4,7 @@
 
 CoachConnect será un marketplace de entrenadores para consumidores en España, inicialmente en español e inglés. La promesa principal es: **“Encuentra el entrenador adecuado para ti, disponible ahora.”**
 
-El consumidor entra en una home interactiva de pantalla completa, elige especialidad, subespecialidad, objetivo, modalidad, ubicación, horario y presupuesto, y recibe resultados explicables antes de contactar, reservar y pagar. La home no será una landing tradicional con secciones de marketing: el cuestionario es el producto.
+El consumidor entra en una home interactiva de pantalla completa, elige especialidad, subespecialidad, modalidad, ubicación y presupuesto, y recibe resultados explicables antes de contactar, reservar y pagar. La home no será una landing tradicional con secciones de marketing: el cuestionario es el producto.
 
 El portal de entrenadores será independiente en navegación, pero compartirá marca, usuarios y datos. El equipo de CoachConnect tendrá un panel de administración para validar profesionales, gestionar categorías, moderar y operar reservas y pagos.
 
@@ -16,8 +16,8 @@ El TFG se usa como base conceptual para el marketplace, la personalización, las
 
 - Home interactiva con la pregunta «¿Qué quieres entrenar?».
 - Cuestionario inicial antes de mostrar resultados.
-- Categorías, subcategorías y objetivos.
-- Filtros por especialidad, modalidad, ubicación, disponibilidad, precio e idioma.
+- Categorías y subcategorías. Los objetivos se incorporarán cuando cada servicio pueda declarar compatibilidades estructuradas.
+- Filtros por especialidad, modalidad, ubicación, precio e idioma.
 - Resultados por mejor coincidencia y orden alternativo por reputación, disponibilidad o precio.
 - Perfil de entrenador con especialidad, agenda, precio, modalidad, validación y reseñas.
 - Mensajería directa antes y después de reservar, con texto, imágenes y archivos ligeros.
@@ -47,7 +47,7 @@ El TFG se usa como base conceptual para el marketplace, la personalización, las
 - Suspensión de perfiles y usuarios.
 - Gestión de reservas, pagos, reembolsos e incidencias.
 - Moderación de mensajes y archivos denunciados.
-- Métricas básicas, pesos de matching y auditoría de acciones.
+- Métricas básicas, orden de matching y auditoría de acciones.
 
 ## Validación profesional
 
@@ -57,11 +57,11 @@ Un perfil con documentación aportada puede aparecer en búsquedas, pero no acep
 
 ## Matching
 
-Primero se aplican filtros de elegibilidad: especialidad compatible, modalidad, disponibilidad, ubicación cuando sea presencial y validación para reservar. Después se calcula una puntuación ponderada y explicable.
+Primero se aplican filtros de elegibilidad: especialidad compatible, modalidad, ubicación cuando sea presencial y validación para reservar. Después se aplica un orden lexicográfico y explicable.
 
-Configuración inicial: especialidad/subespecialidad 65%, objetivo/servicio 10%, modalidad 10%, disponibilidad 10%, reputación 5%. Los pesos podrán redistribuirse según la prioridad seleccionada y configurarse desde administración. El consumidor verá motivos comprensibles («Coincide con tu especialidad», «Responde ahora», etc.), no una cifra técnica opaca.
+Orden fijo inicial: especialidad/subespecialidad, zona indicada, valoraciones y rapidez de respuesta. Modalidad, presupuesto e idioma actúan como criterios de elegibilidad. El consumidor verá motivos comprensibles («Coincide con tu especialidad», «En tu zona», etc.), no una cifra técnica opaca.
 
-Si no existe coincidencia completa, se propone relajar un único criterio —zona, horario, modalidad o presupuesto— explicando la causa.
+Si no existe coincidencia completa, se propone relajar un único criterio —zona, modalidad o presupuesto— explicando la causa.
 
 ## Diseño
 

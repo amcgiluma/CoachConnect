@@ -30,7 +30,6 @@ from .schemas import (
     CustomVideoLinkRequest,
     MatchRequest,
     MatchResponse,
-    MatchingSettingsRequest,
     MessageCreateRequest,
     OAuthUrlResponse,
     PackageCheckoutRequest,
@@ -132,33 +131,25 @@ async def list_categories() -> list[Category]:
 def rank_coaches(
     items: list[CoachSummary],
     request: MatchRequest,
-    weights: dict[str, int] | None = None,
 ) -> MatchResponse:
-    active_weights = {
-        "specialty_weight": 65,
-        "goal_weight": 10,
-        "mode_weight": 10,
-        "availability_weight": 10,
-        "reputation_weight": 5,
-        **(weights or {}),
-    }
-    ranked: list[tuple[float, CoachSummary, set[str]]] = []
-    requested_goal = (request.goal or "").casefold()
+    ranked: list[tuple[tuple[int, int, int, float, int, int], CoachSummary, set[str]]] = []
+    requested_subcategory = (request.subcategory or "").casefold()
     requested_languages = {item.casefold() for item in request.languages}
     for coach in items:
-        score = 0.0
         reasons: list[str] = []
         failed_filters: set[str] = set()
-        specialty_match = coach.category in {request.category, request.subcategory}
+        specialty_match = coach.category == request.category
         if specialty_match:
-            score += active_weights["specialty_weight"]
             reasons.append("Coincide con tu especialidad")
         else:
             failed_filters.add("especialidad")
 
+        subcategory_match = bool(requested_subcategory and requested_subcategory in coach.specialty.casefold())
+        if subcategory_match:
+            reasons.append("Especialidad específica compatible")
+
         mode_match = not request.mode or coach.mode == request.mode or coach.mode.value == "hibrido"
         if request.mode and mode_match:
-            score += active_weights["mode_weight"]
             reasons.append("Modalidad compatible")
         elif not mode_match:
             failed_filters.add("modalidad")
@@ -168,12 +159,6 @@ def rank_coaches(
             reasons.append("En tu zona")
         elif not city_match:
             failed_filters.add("zona")
-
-        if request.availability and coach.responds_now:
-            score += active_weights["availability_weight"]
-            reasons.append("Responde ahora")
-        elif request.availability and "ahora" in request.availability.casefold():
-            failed_filters.add("horario")
 
         if request.max_price and coach.price_from <= request.max_price:
             reasons.append("Dentro de tu presupuesto")
@@ -185,24 +170,14 @@ def rank_coaches(
         elif requested_languages:
             reasons.append("Habla tu idioma")
 
-        if requested_goal:
-            goal_terms = {
-                term.strip(".,;:")
-                for term in requested_goal.split()
-                if len(term.strip(".,;:")) > 3
-            }
-            if any(term in coach.specialty.casefold() for term in goal_terms):
-                score += active_weights["goal_weight"]
-                reasons.append("Encaja con tu objetivo")
-
-        score += min(1, max(0, coach.rating / 5)) * active_weights["reputation_weight"]
-        ranked.append((score, coach.model_copy(update={"match_reasons": reasons}), failed_filters))
+        ranking = (int(specialty_match), int(subcategory_match), int(city_match), coach.rating, coach.reviews, int(coach.responds_now))
+        ranked.append((ranking, coach.model_copy(update={"match_reasons": reasons}), failed_filters))
 
     exact = [item for item in ranked if not item[2]]
     relaxed_filter: str | None = None
     eligible = exact
     if not eligible:
-        relaxable = ("zona", "horario", "modalidad", "presupuesto")
+        relaxable = ("zona", "modalidad", "presupuesto")
         for criterion in relaxable:
             candidates = [item for item in ranked if item[2] == {criterion}]
             if candidates:
@@ -212,14 +187,7 @@ def rank_coaches(
     if not eligible:
         eligible = [item for item in ranked if "especialidad" not in item[2]]
 
-    if request.priority == "price":
-        eligible.sort(key=lambda item: (item[1].price_from, -item[0]))
-    elif request.priority == "rating":
-        eligible.sort(key=lambda item: (item[1].rating, item[0]), reverse=True)
-    elif request.priority == "availability":
-        eligible.sort(key=lambda item: (item[1].responds_now, item[0]), reverse=True)
-    else:
-        eligible.sort(key=lambda item: item[0], reverse=True)
+    eligible.sort(key=lambda item: item[0], reverse=True)
     return MatchResponse(items=[coach for _, coach, _ in eligible], relaxed_filter=relaxed_filter)
 
 
@@ -268,16 +236,7 @@ async def remote_coaches() -> list[CoachSummary]:
 
 @app.post("/api/v1/matching/search", response_model=MatchResponse, tags=["matching"])
 async def match_coaches(request: MatchRequest) -> MatchResponse:
-    weights: dict[str, int] | None = None
-    if db.ready:
-        try:
-            rows = await db.select("matching_settings", id="eq.1")
-            if rows:
-                weights = rows[0]
-        except HTTPException as exc:
-            if exc.status_code != 404:
-                raise
-    return rank_coaches(await remote_coaches(), request, weights)
+    return rank_coaches(await remote_coaches(), request)
 
 
 @app.get("/api/v1/coaches/{coach_id}", tags=["catalog"])
@@ -981,34 +940,3 @@ async def admin_resolve_report(report_id: str, status_value: str, user: AuthUser
         raise HTTPException(404, "Denuncia no encontrada")
     await db.insert("audit_logs", {"actor_id": user.id, "action": "report.updated", "entity_type": "report", "entity_id": report_id, "metadata": {"status": status_value}})
     return rows[0]
-
-
-@app.get("/api/v1/admin/matching-settings", tags=["admin"])
-async def admin_matching_settings(user: AuthUser = Depends(current_user)) -> dict[str, Any]:
-    await assert_admin(user.id)
-    rows = await db.select("matching_settings", id="eq.1")
-    return rows[0]
-
-
-@app.put("/api/v1/admin/matching-settings", tags=["admin"])
-async def admin_update_matching_settings(
-    payload: MatchingSettingsRequest,
-    user: AuthUser = Depends(current_user),
-) -> dict[str, Any]:
-    await assert_admin(user.id)
-    row = await db.upsert(
-        "matching_settings",
-        {"id": 1, **payload.model_dump(), "updated_at": datetime.now(timezone.utc).isoformat()},
-        "id",
-    )
-    await db.insert(
-        "audit_logs",
-        {
-            "actor_id": user.id,
-            "action": "matching.settings.updated",
-            "entity_type": "matching_settings",
-            "entity_id": "1",
-            "metadata": payload.model_dump(),
-        },
-    )
-    return row

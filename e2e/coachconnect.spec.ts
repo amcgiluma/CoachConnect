@@ -9,16 +9,13 @@ test('completa el cuestionario y llega a resultados', async ({ page }) => {
   await expect(page.getByRole('heading', { name: /encuentra tu próximo entrenador/i })).toBeVisible()
   await page.getByRole('button', { name: /fitness & fuerza/i }).click()
   await page.getByRole('button', { name: /musculación/i }).click()
-  await expect(page.getByRole('button', { name: /aumentar masa muscular/i })).toBeVisible()
-  await expect(page.getByRole('button', { name: /reducir grasa corporal/i })).toHaveCount(0)
-  await page.getByRole('button', { name: /ganar fuerza/i }).click()
+  await expect(page.getByRole('heading', { name: /cómo quieres entrenar/i })).toBeVisible()
   await page.getByRole('button', { name: /online/i }).click()
   await page.getByRole('button', { name: /flexible/i }).click()
-  await page.getByRole('button', { name: /flexible/i }).click()
   await page.getByRole('button', { name: /me da igual/i }).click()
-  await page.getByRole('button', { name: /la mejor coincidencia/i }).click()
 
   await expect(page).toHaveURL(/\/buscar\?/)
+  await expect(page).not.toHaveURL(/(?:goal|availability|priority)=/)
   await expect(page.getByRole('heading', { name: /fitness.*encajan contigo/i })).toBeVisible()
 })
 
@@ -59,7 +56,7 @@ test('previsualiza con teclado y conserva accesible el contenido largo', async (
   await expect(page.getByRole('button', { name: /artes marciales/i })).toBeInViewport()
 })
 
-test('adapta los objetivos y acepta cualquier ubicación', async ({ page }) => {
+test('omite objetivos y acepta cualquier ubicación', async ({ page }) => {
   await page.route('https://photon.komoot.io/api/**', async (route) => route.fulfill({
     status: 200,
     contentType: 'application/json',
@@ -68,12 +65,8 @@ test('adapta los objetivos y acepta cualquier ubicación', async ({ page }) => {
   await page.getByRole('button', { name: /artes marciales/i }).click()
   await expect(page.getByLabel(/especialidad elegida: artes marciales/i).locator('img')).toHaveAttribute('src', '/images/categories/martial.webp')
   await page.getByRole('button', { name: /muay thai/i }).click()
-  await expect(page.getByRole('heading', { name: /qué quieres conseguir con tu práctica/i })).toBeVisible()
-  await expect(page.getByRole('button', { name: /aprender defensa personal/i })).toBeVisible()
-  await expect(page.getByRole('button', { name: /perder peso/i })).toHaveCount(0)
-  await page.getByRole('button', { name: /mejorar técnica/i }).click()
+  await expect(page.getByRole('heading', { name: /cómo quieres entrenar/i })).toBeVisible()
   await page.getByRole('button', { name: /^presencial$/i }).click()
-  await page.getByRole('button', { name: /^flexible$/i }).click()
   await page.getByLabel(/ciudad, municipio, barrio o código postal/i).fill('Granada')
   await page.getByRole('option', { name: /granada.*andalucía/i }).click()
   await page.getByRole('button', { name: /continuar con esta ubicación/i }).click()
@@ -83,9 +76,7 @@ test('adapta los objetivos y acepta cualquier ubicación', async ({ page }) => {
 test('omite la ubicación cuando la modalidad es online', async ({ page }) => {
   await page.getByRole('button', { name: /danza & movimiento/i }).click()
   await page.getByRole('button', { name: /danza urbana/i }).click()
-  await page.getByRole('button', { name: /aprender desde cero/i }).click()
   await page.getByRole('button', { name: /^online$/i }).click()
-  await page.getByRole('button', { name: /^flexible$/i }).click()
   await expect(page.getByRole('heading', { name: /qué presupuesto tienes/i })).toBeVisible()
   await expect(page.getByRole('heading', { name: /dónde quieres entrenar/i })).toHaveCount(0)
 })

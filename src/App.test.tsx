@@ -1,7 +1,6 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
-import { getCategoryGoalLabels } from './questionnaire'
 
 afterEach(() => {
   cleanup()
@@ -19,28 +18,15 @@ describe('CoachConnect', () => {
     fireEvent.click(screen.getByRole('button', { name: /fitness & fuerza/i }))
     expect(screen.getByRole('heading', { name: /qué tipo de entrenamiento buscas/i })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /musculación/i }))
-    expect(screen.getByRole('heading', { name: /qué quieres conseguir con tu entrenamiento/i })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: /cómo quieres entrenar/i })).toBeInTheDocument()
   })
 
-  it('adapts goals to each specialty instead of reusing fitness goals', () => {
-    expect(getCategoryGoalLabels('fitness', 'Musculación')).toContain('Aumentar masa muscular')
-    expect(getCategoryGoalLabels('fitness', 'Musculación')).not.toContain('Reducir grasa corporal')
-    expect(getCategoryGoalLabels('fitness', 'Pérdida de peso')).toContain('Reducir grasa corporal')
-    expect(getCategoryGoalLabels('fitness', 'Pérdida de peso')).not.toContain('Aumentar masa muscular')
-    expect(getCategoryGoalLabels('martial')).toEqual([
-      'Aprender desde cero',
-      'Mejorar técnica',
-      'Preparar un combate o grado',
-      'Aprender defensa personal',
-    ])
-    expect(getCategoryGoalLabels('dance')).not.toContain('Perder peso')
-
+  it('moves directly from specialty to mode without asking for a goal', () => {
     render(<App />)
     fireEvent.click(screen.getByRole('button', { name: /danza & movimiento/i }))
     fireEvent.click(screen.getByRole('button', { name: /danza urbana/i }))
-    expect(screen.getByRole('heading', { name: /qué buscas en tus clases/i })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /preparar una coreografía/i })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /perder peso/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: /cómo quieres entrenar/i })).toBeInTheDocument()
+    expect(screen.queryByText(/objetivo/i)).not.toBeInTheDocument()
   })
 
   it('keeps the selected specialty image visible throughout the questionnaire', () => {
@@ -61,9 +47,7 @@ describe('CoachConnect', () => {
     render(<App />)
     fireEvent.click(screen.getByRole('button', { name: /artes marciales/i }))
     fireEvent.click(screen.getByRole('button', { name: /muay thai/i }))
-    fireEvent.click(screen.getByRole('button', { name: /mejorar técnica/i }))
     fireEvent.click(screen.getByRole('button', { name: /^presencial$/i }))
-    fireEvent.click(screen.getByRole('button', { name: /^flexible$/i }))
 
     const location = screen.getByLabelText(/ciudad, municipio, barrio o código postal/i)
     fireEvent.change(location, { target: { value: 'Granada' } })
@@ -76,7 +60,6 @@ describe('CoachConnect', () => {
     render(<App />)
     fireEvent.click(screen.getByRole('button', { name: /fitness & fuerza/i }))
     fireEvent.click(screen.getByRole('button', { name: /musculación/i }))
-    fireEvent.click(screen.getByRole('button', { name: /ganar fuerza/i }))
 
     const online = screen.getByRole('button', { name: /online/i })
     const inPerson = screen.getByRole('button', { name: /presencial/i })

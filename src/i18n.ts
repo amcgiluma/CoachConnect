@@ -16,7 +16,7 @@ const resources = {
         titleBefore: 'Encuentra',
         titleAccent: 'tu próximo',
         titleAfter: 'entrenador.',
-        description: 'Elige qué quieres entrenar. Comparamos especialidad, objetivos y disponibilidad para que reserves con el entrenador adecuado, online o presencial.',
+        description: 'Elige qué quieres entrenar. Priorizamos especialidad, zona, valoraciones y rapidez de respuesta para que reserves con el entrenador adecuado.',
         action: 'Elegir qué quiero entrenar',
         verified: 'Entrenadores verificados',
         proofRating: '4,9/5 · 152 reseñas reales',
@@ -32,9 +32,9 @@ const resources = {
           status: 'Categoría activa',
           specialty: 'Especialidad',
           criteria: 'Así encontramos tu coach',
-          goal: 'Objetivo',
-          mode: 'Modalidad',
-          availability: 'Horario',
+          location: 'Zona',
+          rating: 'Valoraciones',
+          response: 'Respuesta',
           ready: 'Listo para afinar tu búsqueda',
           action: 'Elegir especialidad',
         },
@@ -77,7 +77,7 @@ const resources = {
         titleBefore: 'Find',
         titleAccent: 'your next',
         titleAfter: 'coach.',
-        description: 'Choose what you want to train. We compare expertise, goals and availability so you can book the right coach, online or in person.',
+        description: 'Choose what you want to train. We prioritise expertise, location, ratings and response speed so you can book the right coach.',
         action: 'Choose what to train',
         verified: 'Verified coaches',
         proofRating: '4.9/5 · 152 real reviews',
@@ -93,9 +93,9 @@ const resources = {
           status: 'Active category',
           specialty: 'Specialty',
           criteria: 'How we find your coach',
-          goal: 'Goal',
-          mode: 'Format',
-          availability: 'Schedule',
+          location: 'Location',
+          rating: 'Ratings',
+          response: 'Response',
           ready: 'Ready to refine your search',
           action: 'Choose a specialty',
         },
@@ -128,13 +128,13 @@ const resources = {
 
 void i18n.use(initReactI18next).init({
   resources,
-  lng: localStorage.getItem('coachconnect-language') || 'es',
+  lng: typeof window !== 'undefined' ? window.localStorage?.getItem('coachconnect-language') || 'es' : 'es',
   fallbackLng: 'es',
   interpolation: { escapeValue: false },
 })
 
 i18n.on('languageChanged', (language) => {
-  localStorage.setItem('coachconnect-language', language)
+  window.localStorage?.setItem('coachconnect-language', language)
   document.documentElement.lang = language
 })
 
