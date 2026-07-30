@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime, time as datetime_time, timedelta, timezone
 import logging
 from typing import Any
@@ -11,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
 from .config import settings
-from .dependencies import current_user
+from .dependencies import close_auth_client, current_user
 from .schemas import (
     AuthUser,
     AvailabilityExceptionRequest,
@@ -50,10 +52,20 @@ from .services import create_checkout, create_package_checkout, db, exchange_oau
 logger = logging.getLogger(__name__)
 
 
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    yield
+    close_database = getattr(db, "close", None)
+    if close_database is not None:
+        await close_database()
+    await close_auth_client()
+
+
 app = FastAPI(
     title=settings.app_name,
     version="1.0.0",
     description="API funcional del marketplace CoachConnect.",
+    lifespan=lifespan,
 )
 
 allowed_origins = {settings.frontend_url, "http://localhost:5173", "http://127.0.0.1:5173"}
@@ -580,17 +592,51 @@ async def create_conversation(payload: ConversationCreateRequest, user: AuthUser
 @app.get("/api/v1/conversations/{conversation_id}/messages", tags=["chat"])
 async def messages(conversation_id: str, user: AuthUser = Depends(current_user)) -> list[dict[str, Any]]:
     await assert_participant(conversation_id, user.id)
-    return await db.select("messages", conversation_id=f"eq.{conversation_id}", order="created_at.asc")
+    # Bound the payload as conversations grow. Fetch newest-first so the limit
+    # never hides recent messages, then restore chronological display order.
+    rows = await db.select(
+        "messages",
+        conversation_id=f"eq.{conversation_id}",
+        order="created_at.desc",
+        limit="200",
+    )
+    return list(reversed(rows))
+
+
+async def notify_message_recipient(
+    recipient_id: str,
+    kind: str,
+    title: str,
+    body: str,
+    action_url: str,
+    message_id: str,
+) -> None:
+    try:
+        await notify_user(recipient_id, kind, title, body, action_url)
+    except Exception as exc:
+        # Delivery is ancillary: the durable message must remain successful.
+        detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+        logger.warning("Mensaje %s guardado, pero la notificación falló: %s", message_id, detail)
 
 
 @app.post("/api/v1/conversations/{conversation_id}/messages", tags=["chat"])
-async def send_message(conversation_id: str, payload: MessageCreateRequest, user: AuthUser = Depends(current_user)) -> dict[str, Any]:
+async def send_message(
+    conversation_id: str,
+    payload: MessageCreateRequest,
+    background: BackgroundTasks,
+    user: AuthUser = Depends(current_user),
+) -> dict[str, Any]:
     conversation = await assert_participant(conversation_id, user.id)
     other_user_id = conversation["coach_id"] if conversation["consumer_id"] == user.id else conversation["consumer_id"]
-    await assert_not_blocked(user.id, other_user_id)
     if payload.attachment_path and not payload.attachment_path.startswith(f"{conversation_id}/{user.id}/"):
         raise HTTPException(422, "La ruta del adjunto no pertenece a esta conversación")
-    existing_messages = await db.select("messages", select="id", conversation_id=f"eq.{conversation_id}", limit="1")
+    # These checks are independent. Running them together removes two network
+    # round trips from the critical path while preserving all validations.
+    _, existing_messages, sender_rows = await asyncio.gather(
+        assert_not_blocked(user.id, other_user_id),
+        db.select("messages", select="id", conversation_id=f"eq.{conversation_id}", limit="1"),
+        db.select("profiles", select="display_name", id=f"eq.{user.id}"),
+    )
     row = await db.insert(
         "messages",
         {
@@ -601,22 +647,18 @@ async def send_message(conversation_id: str, payload: MessageCreateRequest, user
         },
     )
     await db.update("conversations", {"last_message_at": row["created_at"]}, id=f"eq.{conversation_id}")
-    sender_rows = await db.select("profiles", select="display_name", id=f"eq.{user.id}")
     sender_name = sender_rows[0]["display_name"] if sender_rows else (user.email or "Alguien")
     title = "Nueva conversación" if not existing_messages else "Nuevo mensaje"
     preview = payload.body.strip()[:120] or "Te ha enviado un archivo."
-    try:
-        await notify_user(
-            other_user_id,
-            "conversation_started" if not existing_messages else "message",
-            title,
-            f"{sender_name}: {preview}",
-            f"/mensajes?conversation={conversation_id}",
-        )
-    except HTTPException as exc:
-        # El mensaje ya está guardado. Una incidencia de notificación no debe
-        # provocar que el cliente lo reenvíe y termine duplicándolo.
-        logger.warning("Mensaje %s guardado, pero la notificación falló: %s", row["id"], exc.detail)
+    background.add_task(
+        notify_message_recipient,
+        other_user_id,
+        "conversation_started" if not existing_messages else "message",
+        title,
+        f"{sender_name}: {preview}",
+        f"/mensajes?conversation={conversation_id}",
+        row["id"],
+    )
     return row
 
 

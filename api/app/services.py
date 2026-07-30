@@ -33,6 +33,22 @@ class SupabaseAdmin:
             "Content-Type": "application/json",
             "Prefer": "return=representation",
         }
+        # Reusing one client keeps the TLS connection to PostgREST alive. Chat
+        # sends perform several small requests, so reconnecting for every one
+        # costs far more than the database work itself.
+        self._client: httpx.AsyncClient | None = None
+
+    def _http_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                timeout=15,
+                limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+            )
+        return self._client
+
+    async def close(self) -> None:
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
 
     @property
     def ready(self) -> bool:
@@ -54,8 +70,13 @@ class SupabaseAdmin:
         headers = dict(self.headers)
         if prefer:
             headers["Prefer"] = prefer
-        async with httpx.AsyncClient(timeout=15) as client:
-            response = await client.request(method, f"{self.base}/{table}", params=params, json=json, headers=headers)
+        response = await self._http_client().request(
+            method,
+            f"{self.base}/{table}",
+            params=params,
+            json=json,
+            headers=headers,
+        )
         if response.status_code >= 400:
             detail = response.json().get("message", response.text) if response.content else "Error de base de datos"
             raise HTTPException(response.status_code, detail)

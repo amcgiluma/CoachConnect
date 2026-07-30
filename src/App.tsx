@@ -10,6 +10,7 @@ import {
 } from 'lucide-react'
 import { AuthProvider, useAuth } from './auth'
 import { AuthModal } from './components/AuthModal'
+import { AvailabilityCalendar } from './components/AvailabilityCalendar'
 import { CategorySelector } from './components/CategorySelector'
 import { CoachAvatar } from './components/CoachAvatar'
 import { HomeMatchStage } from './components/HomeMatchStage'
@@ -31,7 +32,7 @@ type MatchApiResponse = { items: MatchApiCoach[]; relaxed_filter: string | null 
 type LocalBooking = { id: string; coachId: string; coachName: string; serviceName: string; startsAt: string; amount: number; status: string }
 type Profile = { id: string; display_name: string; role: 'consumer' | 'coach' | 'admin' }
 type AvailableSlot = { starts_at: string; ends_at: string; label: string }
-type ChatMessage = { id: string; conversation_id: string; sender_id: string; body: string; attachment_path?: string | null; created_at: string }
+type ChatMessage = { id: string; conversation_id: string; sender_id: string; body: string; attachment_path?: string | null; created_at: string; delivery_status?: 'sending' }
 const CoachMap = lazy(() => import('./components/CoachMap').then((module) => ({ default: module.CoachMap })))
 
 const mergeMessage = (items: ChatMessage[], row: ChatMessage) =>
@@ -419,6 +420,7 @@ function CoachProfile({ onAuth }: { onAuth: () => void }) {
   const [busy, setBusy] = useState(false)
   const [chatOpen, setChatOpen] = useState(false)
   const [slots, setSlots] = useState<AvailableSlot[]>([])
+  const [slotsLoading, setSlotsLoading] = useState(false)
   useEffect(() => {
     if (!isRemoteCoach(coachId)) return
     api<any>(`/api/v1/coaches/${coachId}`).then((row) => {
@@ -434,15 +436,18 @@ function CoachProfile({ onAuth }: { onAuth: () => void }) {
     const selectedService = coach?.services[service]
     if (!isRemoteCoach(coachId) || !selectedService?.id) {
       setSlots(['Hoy · 18:30', 'Hoy · 20:00', 'Mañana · 08:00', 'Mañana · 17:30', 'Jueves · 09:00', 'Viernes · 19:00'].map((label) => ({ starts_at: label, ends_at: label, label })))
+      setSlotsLoading(false)
       return
     }
     setSlot('')
+    setSlotsLoading(true)
     api<{ items: Array<{ starts_at: string; ends_at: string }> }>(`/api/v1/coaches/${coachId}/slots?service_id=${selectedService.id}`)
       .then(({ items }) => setSlots(items.map((item) => ({
         ...item,
         label: new Date(item.starts_at).toLocaleString('es-ES', { weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }),
       }))))
       .catch(() => setSlots([]))
+      .finally(() => setSlotsLoading(false))
   }, [coachId, coach?.services, service])
   if (!coach) return <NotFound />
   const reserve = async () => {
@@ -483,7 +488,7 @@ function CoachProfile({ onAuth }: { onAuth: () => void }) {
   }
   return <section className="profile-screen"><Link className="back-link" to="/buscar"><ArrowLeft /> Volver a resultados</Link><div className="profile-hero"><CoachAvatar coach={coach} className="profile-avatar" eager /><div className="profile-title"><div className="profile-title-line"><h1>{coach.name}</h1>{coach.onlineNow && <span className="live-badge">Disponible ahora</span>}</div><p>{coach.specialty} · {coach.city}</p><div className="profile-rating"><Star fill="currentColor" /><strong>{coach.rating}</strong><span>{coach.reviews} reseñas</span>{coach.verified && <span className="verified-copy"><BadgeCheck /> Identidad y título verificados</span>}</div></div></div>
     <div className="profile-grid"><div className="profile-details"><section className="profile-block"><p className="eyebrow">Cómo entrena</p><p className="profile-bio">{coach.bio}</p><div className="tag-row large">{coach.tags.map((tag) => <span key={tag}>{tag}</span>)}</div></section><section className="profile-block"><div className="section-title"><p className="eyebrow">Servicios</p><span>Elige una opción</span></div><div className="service-list">{coach.services.map((item, index) => <button className={`service-row ${service === index ? 'selected' : ''}`} onClick={() => setService(index)} key={item.name}><span className="service-radio">{service === index && <Check />}</span><span><strong>{item.name}</strong><small>{item.detail}</small></span><b>{item.price} €</b></button>)}</div></section><section className="profile-block review-highlight"><div><p className="eyebrow">Lo que más se repite</p><p>“Explica con claridad, escucha y adapta el entrenamiento de verdad.”</p><span>Reseñas verificadas tras sesiones reales</span></div><Star fill="currentColor" /></section></div>
-      <aside className="booking-card"><div className="booking-card-top"><p className="eyebrow">{packageId ? 'Sesión incluida en tu bono' : coach.services[service]?.packageSize && coach.services[service]!.packageSize! > 1 ? 'Tu bono' : 'Tu próxima sesión'}</p><strong>{packageId ? '0 €' : `${coach.services[service]?.price} €`}</strong><small>{coach.services[service]?.name} · cancelación gratis hasta 24 h antes</small></div>{(packageId || !coach.services[service]?.packageSize || coach.services[service]!.packageSize! <= 1) && <><p className="calendar-heading"><CalendarDays /> Horarios disponibles</p><div className="slot-grid">{slots.map((item) => <button key={item.starts_at} className={slot === item.starts_at ? 'selected' : ''} onClick={() => setSlot(item.starts_at)}>{item.label}</button>)}</div>{!slots.length && <p className="booking-note">No hay huecos publicados para los próximos días.</p>}</>}<Button className="full-button" onClick={reserve} disabled={busy || !coach.verified || ((Boolean(packageId) || !coach.services[service]?.packageSize || coach.services[service]!.packageSize! <= 1) && !slots.length)}>{busy && <LoaderCircle className="spin" />} {coach.verified ? (packageId ? 'Reservar con mi bono' : coach.services[service]?.packageSize && coach.services[service]!.packageSize! > 1 ? 'Comprar bono' : 'Reservar y pagar') : 'Pendiente de verificación'}</Button><button className="chat-cta" onClick={contact}><MessageCircle /> Preguntar antes de reservar</button><p className="booking-note"><ShieldCheck /> Pago protegido por Stripe. La dirección exacta nunca se muestra antes de confirmar.</p></aside>
+      <aside className="booking-card"><div className="booking-card-top"><p className="eyebrow">{packageId ? 'Sesión incluida en tu bono' : coach.services[service]?.packageSize && coach.services[service]!.packageSize! > 1 ? 'Tu bono' : 'Tu próxima sesión'}</p><strong>{packageId ? '0 €' : `${coach.services[service]?.price} €`}</strong><small>{coach.services[service]?.name} · cancelación gratis hasta 24 h antes</small></div>{(packageId || !coach.services[service]?.packageSize || coach.services[service]!.packageSize! <= 1) && <><p className="calendar-heading"><CalendarDays /> Horarios disponibles</p><AvailabilityCalendar slots={slots} value={slot} onChange={setSlot} loading={slotsLoading} /></>}<Button className="full-button" onClick={reserve} disabled={busy || !coach.verified || ((Boolean(packageId) || !coach.services[service]?.packageSize || coach.services[service]!.packageSize! <= 1) && !slots.length)}>{busy && <LoaderCircle className="spin" />} {coach.verified ? (packageId ? 'Reservar con mi bono' : coach.services[service]?.packageSize && coach.services[service]!.packageSize! > 1 ? 'Comprar bono' : 'Reservar y pagar') : 'Pendiente de verificación'}</Button><button className="chat-cta" onClick={contact}><MessageCircle /> Preguntar antes de reservar</button><p className="booking-note"><ShieldCheck /> Pago protegido por Stripe. La dirección exacta nunca se muestra antes de confirmar.</p></aside>
     </div>{chatOpen && <QuickChat coach={coach} onClose={() => setChatOpen(false)} />}</section>
 }
 
@@ -496,6 +501,10 @@ function QuickChat({ coach, onClose }: { coach: Coach; onClose: () => void }) {
   const send = async (event: FormEvent) => {
     event.preventDefault(); if (!body.trim() || !user) return
     const message = body.trim()
+    const optimisticId = `sending:${crypto.randomUUID()}`
+    const optimistic: ChatMessage = { id: optimisticId, conversation_id: conversationId || '', sender_id: user.id, body: message, created_at: new Date().toISOString(), delivery_status: 'sending' }
+    setSent((items) => [...items, optimistic])
+    setBody('')
     setBusy(true)
     try {
       if (!isRemoteCoach(coach.id)) throw new Error('Este perfil no puede recibir mensajes reales.')
@@ -506,14 +515,15 @@ function QuickChat({ coach, onClose }: { coach: Coach; onClose: () => void }) {
         setConversationId(id)
       }
       const row = await api<ChatMessage>(`/api/v1/conversations/${id}/messages`, { method: 'POST', body: JSON.stringify({ body: message }) })
-      setSent((items) => mergeMessage(items, row))
-      setBody('')
+      setSent((items) => mergeMessage(items.filter((item) => item.id !== optimisticId), row))
       toast.success('Mensaje guardado y enviado')
     } catch (error) {
+      setSent((items) => items.filter((item) => item.id !== optimisticId))
+      setBody(message)
       toast.error(error instanceof Error ? error.message : 'No se pudo enviar')
     } finally { setBusy(false) }
   }
-  return <div className="modal-backdrop"><section className="chat-sheet" role="dialog" aria-modal="true" aria-labelledby="chat-title"><header><CoachAvatar coach={coach} className="avatar" /><div><p className="eyebrow">Conversación directa</p><h2 id="chat-title">{coach.name}</h2></div><button className="icon-button" onClick={onClose} aria-label="Cerrar chat"><X /></button></header><div className="chat-messages"><div className="message incoming">Hola, cuéntame qué quieres conseguir y qué horarios tienes.</div>{sent.map((item) => <div className="message outgoing" key={item.id}>{item.body}<small>{new Date(item.created_at).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</small></div>)}</div>{conversationId && <Link className="chat-open-link" to={`/mensajes?conversation=${conversationId}`} onClick={onClose}>Abrir conversación completa <ArrowRight /></Link>}<form className="chat-composer" onSubmit={send}><button type="button" aria-label="Adjuntar archivo" disabled><Paperclip /></button><input aria-label="Mensaje" value={body} onChange={(event) => setBody(event.target.value)} placeholder="Escribe tu mensaje…" disabled={busy} /><button type="submit" aria-label="Enviar" disabled={busy || !body.trim()}>{busy ? <LoaderCircle className="spin" /> : <Send />}</button></form></section></div>
+  return <div className="modal-backdrop"><section className="chat-sheet" role="dialog" aria-modal="true" aria-labelledby="chat-title"><header><CoachAvatar coach={coach} className="avatar" /><div><p className="eyebrow">Conversación directa</p><h2 id="chat-title">{coach.name}</h2></div><button className="icon-button" onClick={onClose} aria-label="Cerrar chat"><X /></button></header><div className="chat-messages"><div className="message incoming">Hola, cuéntame qué quieres conseguir y qué horarios tienes.</div>{sent.map((item) => <div className={`message outgoing ${item.delivery_status === 'sending' ? 'sending' : ''}`} key={item.id}>{item.body}<small>{item.delivery_status === 'sending' ? 'Enviando…' : new Date(item.created_at).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</small></div>)}</div>{conversationId && <Link className="chat-open-link" to={`/mensajes?conversation=${conversationId}`} onClick={onClose}>Abrir conversación completa <ArrowRight /></Link>}<form className="chat-composer" onSubmit={send}><button type="button" aria-label="Adjuntar archivo" disabled><Paperclip /></button><input aria-label="Mensaje" value={body} onChange={(event) => setBody(event.target.value)} placeholder="Escribe tu mensaje…" disabled={busy} /><button type="submit" aria-label="Enviar" disabled={busy || !body.trim()}>{busy ? <LoaderCircle className="spin" /> : <Send />}</button></form></section></div>
 }
 
 function Account({ onAuth }: { onAuth: () => void }) {
@@ -574,12 +584,19 @@ function Messages({ onAuth }: { onAuth: () => void }) {
   const send = async (event: FormEvent) => {
     event.preventDefault(); if (!active || !body.trim() || busy) return
     const text = body.trim()
+    const optimisticId = `sending:${crypto.randomUUID()}`
+    const optimistic: ChatMessage = { id: optimisticId, conversation_id: active, sender_id: user.id, body: text, created_at: new Date().toISOString(), delivery_status: 'sending' }
+    setMessages((items) => [...items, optimistic])
+    setBody('')
     setBusy(true)
     try {
       const row = await api<ChatMessage>(`/api/v1/conversations/${active}/messages`, { method: 'POST', body: JSON.stringify({ body: text }) })
-      setMessages((items) => mergeMessage(items, row))
-      setBody('')
-    } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo enviar') } finally { setBusy(false) }
+      setMessages((items) => mergeMessage(items.filter((item) => item.id !== optimisticId), row))
+    } catch (error) {
+      setMessages((items) => items.filter((item) => item.id !== optimisticId))
+      setBody(text)
+      toast.error(error instanceof Error ? error.message : 'No se pudo enviar')
+    } finally { setBusy(false) }
   }
   const activeConversation = conversations.find((item) => item.id === active)
   const activeOther = activeConversation ? (activeConversation.consumer_id === user.id ? activeConversation.coach : activeConversation.consumer) : null
@@ -609,7 +626,7 @@ function Messages({ onAuth }: { onAuth: () => void }) {
     if (!activeOther?.id) return
     try { await api('/api/v1/blocks', { method: 'POST', body: JSON.stringify({ user_id: activeOther.id }) }); toast.success('Usuario bloqueado') } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo bloquear') }
   }
-  return <section className="messages-screen"><Link className="back-link messages-back" to="/cuenta"><ArrowLeft /> Volver a mi cuenta</Link><div className="messages-head"><p className="eyebrow">Mensajería privada</p><h1>Tus conversaciones.</h1></div>{loadError && <p className="inbox-error" role="alert">{loadError}</p>}<div className="inbox"><aside>{conversations.map((item) => { const other = item.consumer_id === user.id ? item.coach : item.consumer; return <button className={active === item.id ? 'active' : ''} key={item.id} onClick={() => chooseConversation(item.id)}><span className="avatar">{(other?.display_name || 'CC').slice(0, 2).toUpperCase()}</span><span><strong>{other?.display_name || 'CoachConnect'}</strong><small>Conversación segura</small></span></button> })}{!conversations.length && <p>Aún no tienes conversaciones.</p>}</aside><div className="conversation">{active && <div className="conversation-actions"><strong>{activeOther?.display_name || 'CoachConnect'}</strong><button className="text-button" onClick={reportConversation}>Denunciar</button><button className="text-button" onClick={blockActiveUser}>Bloquear</button></div>}<div className="chat-messages">{messages.map((item) => <div className={`message ${item.sender_id === user.id ? 'outgoing' : 'incoming'}`} key={item.id}>{item.body}{item.attachment_path && <button className="attachment-link" onClick={() => openAttachment(item.attachment_path || '')}><Paperclip /> Abrir archivo</button>}<small>{new Date(item.created_at).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</small></div>)}</div>{active && <form className="chat-composer" onSubmit={send}><label className="attachment-button" aria-label="Adjuntar archivo"><Paperclip /><input type="file" accept=".pdf,image/jpeg,image/png,image/webp" onChange={attach} /></label><input aria-label="Mensaje" value={body} onChange={(event) => setBody(event.target.value)} placeholder="Escribe un mensaje…" disabled={busy} /><button type="submit" aria-label="Enviar" disabled={busy || !body.trim()}>{busy ? <LoaderCircle className="spin" /> : <Send />}</button></form>}</div></div></section>
+  return <section className="messages-screen"><Link className="back-link messages-back" to="/cuenta"><ArrowLeft /> Volver a mi cuenta</Link><div className="messages-head"><p className="eyebrow">Mensajería privada</p><h1>Tus conversaciones.</h1></div>{loadError && <p className="inbox-error" role="alert">{loadError}</p>}<div className="inbox"><aside>{conversations.map((item) => { const other = item.consumer_id === user.id ? item.coach : item.consumer; return <button className={active === item.id ? 'active' : ''} key={item.id} onClick={() => chooseConversation(item.id)}><span className="avatar">{(other?.display_name || 'CC').slice(0, 2).toUpperCase()}</span><span><strong>{other?.display_name || 'CoachConnect'}</strong><small>Conversación segura</small></span></button> })}{!conversations.length && <p>Aún no tienes conversaciones.</p>}</aside><div className="conversation">{active && <div className="conversation-actions"><strong>{activeOther?.display_name || 'CoachConnect'}</strong><button className="text-button" onClick={reportConversation}>Denunciar</button><button className="text-button" onClick={blockActiveUser}>Bloquear</button></div>}<div className="chat-messages">{messages.map((item) => <div className={`message ${item.sender_id === user.id ? 'outgoing' : 'incoming'} ${item.delivery_status === 'sending' ? 'sending' : ''}`} key={item.id}>{item.body}{item.attachment_path && <button className="attachment-link" onClick={() => openAttachment(item.attachment_path || '')}><Paperclip /> Abrir archivo</button>}<small>{item.delivery_status === 'sending' ? 'Enviando…' : new Date(item.created_at).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</small></div>)}</div>{active && <form className="chat-composer" onSubmit={send}><label className="attachment-button" aria-label="Adjuntar archivo"><Paperclip /><input type="file" accept=".pdf,image/jpeg,image/png,image/webp" onChange={attach} /></label><input aria-label="Mensaje" value={body} onChange={(event) => setBody(event.target.value)} placeholder="Escribe un mensaje…" disabled={busy} /><button type="submit" aria-label="Enviar" disabled={busy || !body.trim()}>{busy ? <LoaderCircle className="spin" /> : <Send />}</button></form>}</div></div></section>
 }
 
 function Notifications({ onAuth }: { onAuth: () => void }) {

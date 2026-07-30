@@ -2,7 +2,7 @@ import asyncio
 from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
-from fastapi import HTTPException
+from fastapi import BackgroundTasks, HTTPException
 from starlette.requests import Request
 
 import app.main as main_module
@@ -160,11 +160,20 @@ def test_first_message_is_persisted_before_new_conversation_notification(monkeyp
         notifications.append(args)
 
     monkeypatch.setattr(main_module, "notify_user", capture_notification)
-    row = asyncio.run(main_module.send_message(
-        "conversation-1",
-        MessageCreateRequest(body="Hola Marta"),
-        AuthUser(id="consumer-1", email="consumer@example.com"),
-    ))
+
+    async def send_and_deliver():
+        background = BackgroundTasks()
+        row = await main_module.send_message(
+            "conversation-1",
+            MessageCreateRequest(body="Hola Marta"),
+            background,
+            AuthUser(id="consumer-1", email="consumer@example.com"),
+        )
+        assert notifications == []
+        await background()
+        return row
+
+    row = asyncio.run(send_and_deliver())
 
     assert row["body"] == "Hola Marta"
     assert database.inserted[0][0] == "messages"
@@ -179,11 +188,38 @@ def test_notification_failure_does_not_turn_saved_message_into_failed_send(monke
         raise HTTPException(503, "Proveedor de correo no disponible")
 
     monkeypatch.setattr(main_module, "notify_user", failed_notification)
-    row = asyncio.run(main_module.send_message(
-        "conversation-1",
-        MessageCreateRequest(body="Segundo mensaje"),
-        AuthUser(id="coach-1", email="coach@example.com"),
-    ))
+
+    async def send_and_deliver():
+        background = BackgroundTasks()
+        row = await main_module.send_message(
+            "conversation-1",
+            MessageCreateRequest(body="Segundo mensaje"),
+            background,
+            AuthUser(id="coach-1", email="coach@example.com"),
+        )
+        await background()
+        return row
+
+    row = asyncio.run(send_and_deliver())
 
     assert row["id"] == "message-1"
     assert len([entry for entry in database.inserted if entry[0] == "messages"]) == 1
+
+
+def test_messages_returns_latest_page_in_chronological_order(monkeypatch) -> None:
+    class MessageDatabase(ChatDatabase):
+        async def select(self, table: str, select: str = "*", **filters):
+            if table == "messages":
+                assert filters["order"] == "created_at.desc"
+                assert filters["limit"] == "200"
+                return [{"id": "newest"}, {"id": "older"}]
+            return await super().select(table, select, **filters)
+
+    monkeypatch.setattr(main_module, "db", MessageDatabase())
+
+    rows = asyncio.run(main_module.messages(
+        "conversation-1",
+        AuthUser(id="consumer-1", email="consumer@example.com"),
+    ))
+
+    assert [row["id"] for row in rows] == ["older", "newest"]
