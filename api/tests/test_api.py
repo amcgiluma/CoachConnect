@@ -1,6 +1,7 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
+import pytest
 from fastapi.testclient import TestClient
 from fastapi import BackgroundTasks, HTTPException
 from starlette.requests import Request
@@ -79,6 +80,111 @@ def test_matching_uses_fixed_rating_then_response_order() -> None:
         "slow-tie",
         "fast-lower-rating",
     ]
+
+
+class PublicCoachDatabase:
+    ready = True
+
+    def __init__(self) -> None:
+        self.selects: list[tuple[str, str, dict]] = []
+
+    async def select(self, table: str, select: str = "*", **filters):
+        self.selects.append((table, select, filters))
+        if table == "categories":
+            return [
+                {"id": "parent-fitness", "slug": "fitness", "parent_id": None},
+                {"id": "child-strength", "slug": "strength", "parent_id": "parent-fitness"},
+            ]
+        if table == "coach_profiles":
+            return [{
+                "user_id": "coach-1",
+                "headline": "Fuerza para principiantes",
+                "bio": "Entrenamiento progresivo y adaptado.",
+                "city": "Madrid",
+                "mode": "hibrido",
+                "verification_status": "verified",
+                "responds_now": False,
+                "rating": 4.8,
+                "review_count": 12,
+                "languages": ["es"],
+                "profiles": {"display_name": "Marta Entrenadora", "avatar_url": None},
+                "coach_services": [{
+                    "id": "service-1",
+                    "name": "Fuerza inicial",
+                    "price_cents": 3000,
+                    "active": True,
+                    "categories": {"id": "child-strength", "slug": "strength", "parent_id": "parent-fitness"},
+                }],
+            }]
+        return []
+
+
+def test_remote_coach_uses_parent_category_and_only_verified_profiles(monkeypatch) -> None:
+    database = PublicCoachDatabase()
+    monkeypatch.setattr(main_module, "db", database)
+
+    rows = asyncio.run(main_module.remote_coaches("fitness"))
+
+    assert rows[0].category == "fitness"
+    coach_query = next(item for item in database.selects if item[0] == "coach_profiles")
+    assert coach_query[2]["verification_status"] == "eq.verified"
+    assert "stripe_account_id" not in coach_query[1]
+    assert not coach_query[1].startswith("*")
+
+
+def test_public_coach_detail_uses_safe_projection(monkeypatch) -> None:
+    database = PublicCoachDatabase()
+    monkeypatch.setattr(main_module, "db", database)
+
+    row = asyncio.run(main_module.coach_detail("coach-1"))
+
+    assert row["user_id"] == "coach-1"
+    coach_query = next(item for item in database.selects if item[0] == "coach_profiles")
+    assert coach_query[1] == main_module.PUBLIC_COACH_SELECT
+    assert coach_query[2]["verification_status"] == "eq.verified"
+
+
+def test_coach_calendar_is_scoped_to_owner_and_range(monkeypatch) -> None:
+    class CalendarDatabase:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def select(self, table: str, select: str = "*", **filters):
+            self.calls.append((table, filters))
+            return []
+
+    database = CalendarDatabase()
+    monkeypatch.setattr(main_module, "db", database)
+    date_from = datetime(2026, 7, 27, tzinfo=timezone.utc)
+    date_to = date_from + timedelta(days=7)
+
+    result = asyncio.run(main_module.coach_calendar(date_from, date_to, AuthUser(id="coach-1")))
+
+    assert result == {"bookings": [], "exceptions": []}
+    assert all(filters["coach_id"] == "eq.coach-1" for _, filters in database.calls)
+    assert database.calls[0][1]["starts_at"].startswith("lt.2026-08-03")
+
+
+def test_suspended_coach_cannot_resubmit_credentials(monkeypatch) -> None:
+    class SuspendedDatabase:
+        inserted = False
+
+        async def select(self, table: str, select: str = "*", **filters):
+            return [{"verification_status": "suspended"}]
+
+        async def insert(self, table: str, payload: dict):
+            self.inserted = True
+            return payload
+
+    database = SuspendedDatabase()
+    monkeypatch.setattr(main_module, "db", database)
+    payload = main_module.CredentialCreateRequest(title="Título", storage_path="coach-1/title.pdf")
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(main_module.record_credential(payload, AuthUser(id="coach-1")))
+
+    assert error.value.status_code == 409
+    assert database.inserted is False
 
 
 def test_protected_routes_require_a_bearer_token() -> None:
