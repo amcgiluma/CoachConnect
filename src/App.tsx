@@ -103,10 +103,8 @@ function Home() {
   const [category, setCategory] = useState<Category | null>(null)
   const [previewId, setPreviewId] = useState(categories[0].id)
   const [answers, setAnswers] = useState<Record<string, string>>({})
+  const [guideActive, setGuideActive] = useState(false)
   const categorySelectorRef = useRef<HTMLElement>(null)
-  useEffect(() => {
-    if (step > 0) window.scrollTo({ top: 0, behavior: 'auto' })
-  }, [step])
   const begin = (item: Category) => { setCategory(item); setAnswers({ category: item.id }); setStep(1) }
   const finish = (completedAnswers: Record<string, string>) => {
     const search = new URLSearchParams(completedAnswers)
@@ -130,11 +128,15 @@ function Home() {
   const focusCategorySelector = () => {
     const selector = categorySelectorRef.current
     if (!selector) return
+    setGuideActive(false)
     selector.scrollIntoView({
       behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
       block: 'center',
     })
     selector.querySelector<HTMLButtonElement>(`[data-category-id="${previewId}"]`)?.focus({ preventScroll: true })
+    window.requestAnimationFrame(() => {
+      setGuideActive(true)
+    })
   }
   if (step === 0) return <section className="hero-screen" aria-labelledby="home-title">
     <div className="hero-grid" />
@@ -175,6 +177,7 @@ function Home() {
       ref={categorySelectorRef}
       categories={displayCategories}
       activeCategoryId={previewId}
+      guideActive={guideActive}
       onActiveChange={setPreviewId}
       onSelect={(item) => begin(categories.find((categoryItem) => categoryItem.id === item.id) || item)}
       labels={{

@@ -29,6 +29,17 @@ describe('CoachConnect', () => {
     expect(screen.queryByText(/objetivo/i)).not.toBeInTheDocument()
   })
 
+  it('does not force the viewport to the top between questionnaire answers', () => {
+    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined)
+    render(<App />)
+
+    fireEvent.click(screen.getByRole('button', { name: /fitness & fuerza/i }))
+    fireEvent.click(screen.getByRole('button', { name: /musculación/i }))
+
+    expect(screen.getByRole('heading', { name: /cómo quieres entrenar/i })).toBeInTheDocument()
+    expect(scrollTo).not.toHaveBeenCalled()
+  })
+
   it('keeps the selected specialty image visible throughout the questionnaire', () => {
     render(<App />)
     fireEvent.click(screen.getByRole('button', { name: /artes marciales/i }))

@@ -1,4 +1,4 @@
-import { forwardRef, useRef, type UIEvent } from 'react'
+import { forwardRef, useRef, type CSSProperties, type UIEvent } from 'react'
 import { ArrowUpRight, ChevronLeft, ChevronRight } from 'lucide-react'
 import type { Category } from '../data'
 import { getCategoryVisual } from '../lib/media'
@@ -16,6 +16,7 @@ type CategorySelectorLabels = {
 type CategorySelectorProps = {
   categories: Category[]
   activeCategoryId: string
+  guideActive: boolean
   labels: CategorySelectorLabels
   onActiveChange: (categoryId: string) => void
   onSelect: (category: Category) => void
@@ -24,6 +25,7 @@ type CategorySelectorProps = {
 export const CategorySelector = forwardRef<HTMLElement, CategorySelectorProps>(function CategorySelector({
   categories,
   activeCategoryId,
+  guideActive,
   labels,
   onActiveChange,
   onSelect,
@@ -67,7 +69,7 @@ export const CategorySelector = forwardRef<HTMLElement, CategorySelectorProps>(f
   }
 
   return (
-    <section className="category-dock" id="category-selector" ref={forwardedRef} aria-labelledby="category-selector-title">
+    <section className={`category-dock ${guideActive ? 'is-guided' : ''}`} id="category-selector" ref={forwardedRef} aria-labelledby="category-selector-title">
       <div className="dock-heading">
         <span aria-hidden="true">01</span>
         <strong id="category-selector-title">{labels.question}</strong>
@@ -109,6 +111,7 @@ export const CategorySelector = forwardRef<HTMLElement, CategorySelectorProps>(f
               key={item.id}
               data-category-id={item.id}
               className={`category-tile tile-${item.accent} ${isActive ? 'is-previewed' : ''}`}
+              style={{ '--guide-index': categories.indexOf(item) } as CSSProperties}
               onMouseEnter={() => onActiveChange(item.id)}
               onFocus={() => onActiveChange(item.id)}
               onClick={() => onSelect(item)}

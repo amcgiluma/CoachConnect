@@ -95,6 +95,19 @@ test('el carrusel móvil avanza a una categoría exacta', async ({ page }, testI
   await expect(page.getByRole('heading', { level: 2, name: /artes marciales/i })).toBeVisible()
 })
 
+test('mantiene la posición móvil al avanzar entre preguntas', async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith('mobile-'), 'El problema solo afecta al flujo móvil')
+  await page.getByRole('button', { name: /fitness & fuerza/i }).click()
+
+  const lastOption = page.getByRole('button', { name: /calistenia/i })
+  await lastOption.scrollIntoViewIfNeeded()
+  expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0)
+  await lastOption.click()
+
+  await expect(page.getByRole('heading', { name: /cómo quieres entrenar/i })).toBeVisible()
+  expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0)
+})
+
 test('respeta movimiento reducido y ampliación de texto', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' })
   await page.reload()
