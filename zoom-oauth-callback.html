@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"
+    />
+    <title>Conectando Zoom · CoachConnect</title>
+    <style>
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; font: 16px/1.5 system-ui, sans-serif; color: #171717; background: #f7f7f5; }
+      main { width: min(90vw, 36rem); padding: 2rem; background: white; border: 1px solid #deded8; }
+      h1 { margin-top: 0; font-size: 1.5rem; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Conectando Zoom…</h1>
+      <p id="status">Te devolveremos a CoachConnect automáticamente.</p>
+    </main>
+    <script>
+      const incoming = new URLSearchParams(window.location.search);
+      const state = incoming.get('state');
+      const hasResult = incoming.has('code') || incoming.has('error');
+      if (!state || !hasResult) {
+        document.getElementById('status').textContent =
+          'Inicia la conexión desde el botón Zoom de CoachConnect para completar el proceso de forma segura.';
+      } else {
+        const callback = new URL('http://localhost:8000/api/v1/integrations/zoom/callback');
+        for (const key of ['code', 'state', 'error', 'error_description']) {
+          const value = incoming.get(key);
+          if (value) callback.searchParams.set(key, value);
+        }
+        window.location.replace(callback.toString());
+      }
+    </script>
+  </body>
+</html>
