@@ -44,9 +44,10 @@ from .schemas import (
     ServiceMode,
     VerificationRequest,
     VideoReviewRequest,
+    UserAccessRequest,
 )
 from .seed import CATEGORIES, COACHES
-from .services import create_checkout, create_package_checkout, db, exchange_oauth_code, notify_user, oauth_url, provision_meeting, storage_signed_url
+from .services import auth_admin_list_users, auth_admin_set_user_access, create_checkout, create_package_checkout, db, exchange_oauth_code, notify_user, oauth_url, provision_meeting, storage_signed_url
 
 
 logger = logging.getLogger(__name__)
@@ -508,9 +509,26 @@ async def record_credential(payload: CredentialCreateRequest, user: AuthUser = D
     current_status = profiles[0]["verification_status"]
     if current_status == "suspended":
         raise HTTPException(409, "El equipo de CoachConnect debe revisar un perfil suspendido")
+    await db.update(
+        "credential_documents",
+        {
+            "status": "rejected",
+            "review_note": "Sustituido por un nuevo documento enviado por el entrenador",
+            "reviewed_at": datetime.now(timezone.utc).isoformat(),
+        },
+        coach_id=f"eq.{user.id}",
+        status="eq.pending",
+    )
     row = await db.insert("credential_documents", {"coach_id": user.id, **payload.model_dump()})
-    if current_status in {"draft", "rejected"}:
-        await db.update("coach_profiles", {"verification_status": "credentials_submitted"}, user_id=f"eq.{user.id}")
+    await db.update(
+        "coach_profiles",
+        {
+            "verification_status": "credentials_submitted",
+            "verification_note": None,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        },
+        user_id=f"eq.{user.id}",
+    )
     return row
 
 
@@ -526,6 +544,25 @@ async def record_coach_video(payload: CoachVideoRequest, user: AuthUser = Depend
     if not rows:
         raise HTTPException(404, "Completa primero tu perfil profesional")
     return rows[0]
+
+
+@app.get("/api/v1/coach/credentials/status", tags=["coach"])
+async def credential_status(user: AuthUser = Depends(current_user)) -> dict[str, Any]:
+    profiles = await db.select(
+        "coach_profiles",
+        select="verification_status,verification_note,video_path,video_status,video_review_note,updated_at",
+        user_id=f"eq.{user.id}",
+    )
+    if not profiles:
+        raise HTTPException(404, "Completa primero tu perfil profesional")
+    documents = await db.select(
+        "credential_documents",
+        select="id,title,status,review_note,created_at,reviewed_at",
+        coach_id=f"eq.{user.id}",
+        order="created_at.desc",
+        limit="1",
+    )
+    return {**profiles[0], "credential": documents[0] if documents else None}
 
 
 @app.post("/api/v1/checkout", response_model=CheckoutResponse, tags=["payments"])
@@ -896,7 +933,15 @@ async def stripe_webhook(request: Request, background: BackgroundTasks) -> dict[
 @app.get("/api/v1/admin/credentials", tags=["admin"])
 async def admin_credentials(user: AuthUser = Depends(current_user)) -> list[dict[str, Any]]:
     await assert_admin(user.id)
-    return await db.select("credential_documents", order="created_at.asc")
+    documents = await db.select("credential_documents", status="eq.pending", order="created_at.asc")
+    coach_ids = sorted({item["coach_id"] for item in documents})
+    profiles = await db.select(
+        "profiles",
+        select="id,display_name",
+        id=f"in.({','.join(coach_ids)})",
+    ) if coach_ids else []
+    profiles_by_id = {item["id"]: item for item in profiles}
+    return [{**item, "profile": profiles_by_id.get(item["coach_id"])} for item in documents]
 
 
 @app.get("/api/v1/admin/credentials/{document_id}/download", tags=["admin"])
@@ -968,6 +1013,65 @@ async def verify_coach(coach_id: str, payload: VerificationRequest, user: AuthUs
         )
     await db.insert("audit_logs", {"actor_id": user.id, "action": "coach.verification.updated", "entity_type": "coach_profile", "entity_id": coach_id, "metadata": {"status": payload.status}})
     return rows[0]
+
+
+@app.get("/api/v1/admin/users", tags=["admin"])
+async def admin_users(user: AuthUser = Depends(current_user)) -> list[dict[str, Any]]:
+    await assert_admin(user.id)
+    profiles, coaches, auth_users = await asyncio.gather(
+        db.select("profiles", select="id,display_name,role,created_at,updated_at", order="created_at.desc"),
+        db.select("coach_profiles", select="user_id,verification_status,verification_note"),
+        auth_admin_list_users(),
+    )
+    profiles_by_id = {item["id"]: item for item in profiles}
+    coaches_by_id = {item["user_id"]: item for item in coaches}
+    auth_by_id = {item["id"]: item for item in auth_users}
+    ordered_ids = [item["id"] for item in auth_users]
+    ordered_ids.extend(item["id"] for item in profiles if item["id"] not in auth_by_id)
+    result = []
+    for user_id in ordered_ids:
+        profile = profiles_by_id.get(user_id, {})
+        auth_user = auth_by_id.get(user_id, {})
+        banned_until = auth_user.get("banned_until")
+        access_enabled = True
+        if banned_until:
+            try:
+                access_enabled = datetime.fromisoformat(banned_until.replace("Z", "+00:00")) <= datetime.now(timezone.utc)
+            except ValueError:
+                access_enabled = False
+        result.append({
+            "id": user_id,
+            "display_name": profile.get("display_name") or auth_user.get("email") or "Usuario",
+            "email": auth_user.get("email"),
+            "role": profile.get("role", "consumer"),
+            "created_at": profile.get("created_at") or auth_user.get("created_at"),
+            "last_sign_in_at": auth_user.get("last_sign_in_at"),
+            "access_enabled": access_enabled,
+            "coach": coaches_by_id.get(user_id),
+        })
+    return result
+
+
+@app.patch("/api/v1/admin/users/{target_user_id}/access", tags=["admin"])
+async def admin_user_access(
+    target_user_id: str,
+    payload: UserAccessRequest,
+    user: AuthUser = Depends(current_user),
+) -> dict[str, Any]:
+    await assert_admin(user.id)
+    if target_user_id == user.id and not payload.enabled:
+        raise HTTPException(409, "No puedes revocar tu propia cuenta administradora")
+    profiles = await db.select("profiles", select="id", id=f"eq.{target_user_id}")
+    if not profiles:
+        raise HTTPException(404, "Usuario no encontrado")
+    await auth_admin_set_user_access(target_user_id, payload.enabled)
+    await db.insert("audit_logs", {
+        "actor_id": user.id,
+        "action": "user.access.enabled" if payload.enabled else "user.access.revoked",
+        "entity_type": "profile",
+        "entity_id": target_user_id,
+    })
+    return {"id": target_user_id, "access_enabled": payload.enabled}
 
 
 @app.post("/api/v1/admin/categories", tags=["admin"])

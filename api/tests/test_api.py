@@ -187,6 +187,150 @@ def test_suspended_coach_cannot_resubmit_credentials(monkeypatch) -> None:
     assert database.inserted is False
 
 
+def test_resubmitted_credential_supersedes_pending_document_and_restarts_review(monkeypatch) -> None:
+    class CredentialDatabase:
+        def __init__(self) -> None:
+            self.updates: list[tuple[str, dict, dict]] = []
+
+        async def select(self, table: str, select: str = "*", **filters):
+            return [{"verification_status": "verified"}]
+
+        async def update(self, table: str, payload: dict, **filters):
+            self.updates.append((table, payload, filters))
+            return [payload]
+
+        async def insert(self, table: str, payload: dict):
+            return {"id": "credential-2", **payload}
+
+    database = CredentialDatabase()
+    monkeypatch.setattr(main_module, "db", database)
+
+    row = asyncio.run(main_module.record_credential(
+        main_module.CredentialCreateRequest(title="Nuevo título", storage_path="coach-1/new.pdf"),
+        AuthUser(id="coach-1"),
+    ))
+
+    assert row["title"] == "Nuevo título"
+    assert database.updates[0][0] == "credential_documents"
+    assert database.updates[0][2]["status"] == "eq.pending"
+    assert database.updates[1][1]["verification_status"] == "credentials_submitted"
+
+
+def test_admin_credentials_include_coach_identity_and_only_pending_items(monkeypatch) -> None:
+    class AdminDatabase:
+        def __init__(self) -> None:
+            self.credential_filters = {}
+
+        async def select(self, table: str, select: str = "*", **filters):
+            if table == "profiles" and filters.get("role") == "eq.admin":
+                return [{"id": "admin-1"}]
+            if table == "credential_documents":
+                self.credential_filters = filters
+                return [{"id": "doc-1", "coach_id": "coach-1", "title": "Técnico deportivo"}]
+            if table == "profiles":
+                return [{"id": "coach-1", "display_name": "Marta Entrenadora"}]
+            return []
+
+    database = AdminDatabase()
+    monkeypatch.setattr(main_module, "db", database)
+
+    rows = asyncio.run(main_module.admin_credentials(AuthUser(id="admin-1")))
+
+    assert database.credential_filters["status"] == "eq.pending"
+    assert rows[0]["profile"]["display_name"] == "Marta Entrenadora"
+
+
+def test_admin_user_directory_combines_auth_access_and_coach_validity(monkeypatch) -> None:
+    class AdminDatabase:
+        async def select(self, table: str, select: str = "*", **filters):
+            if table == "profiles" and filters.get("role") == "eq.admin":
+                return [{"id": "admin-1"}]
+            if table == "profiles":
+                return [{"id": "coach-1", "display_name": "Marta", "role": "coach", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"}]
+            if table == "coach_profiles":
+                return [{"user_id": "coach-1", "verification_status": "verified", "verification_note": None}]
+            return []
+
+    async def auth_users():
+        return [{"id": "coach-1", "email": "marta@example.com", "banned_until": "2126-01-01T00:00:00Z"}]
+
+    monkeypatch.setattr(main_module, "db", AdminDatabase())
+    monkeypatch.setattr(main_module, "auth_admin_list_users", auth_users)
+
+    rows = asyncio.run(main_module.admin_users(AuthUser(id="admin-1")))
+
+    assert rows[0]["email"] == "marta@example.com"
+    assert rows[0]["access_enabled"] is False
+    assert rows[0]["coach"]["verification_status"] == "verified"
+
+
+def test_credential_status_returns_latest_document_and_video_state(monkeypatch) -> None:
+    class CredentialDatabase:
+        async def select(self, table: str, select: str = "*", **filters):
+            if table == "coach_profiles":
+                return [{
+                    "verification_status": "credentials_submitted",
+                    "verification_note": None,
+                    "video_path": "coach-1/video.mp4",
+                    "video_status": "pending",
+                    "video_review_note": None,
+                    "updated_at": "2026-07-30T10:00:00Z",
+                }]
+            assert filters["order"] == "created_at.desc"
+            assert filters["limit"] == "1"
+            return [{"id": "doc-2", "title": "Título actualizado", "status": "pending"}]
+
+    monkeypatch.setattr(main_module, "db", CredentialDatabase())
+
+    row = asyncio.run(main_module.credential_status(AuthUser(id="coach-1")))
+
+    assert row["video_status"] == "pending"
+    assert row["credential"]["title"] == "Título actualizado"
+
+
+def test_admin_can_revoke_user_access_but_not_their_own(monkeypatch) -> None:
+    class AdminDatabase:
+        def __init__(self) -> None:
+            self.audit: list[dict] = []
+
+        async def select(self, table: str, select: str = "*", **filters):
+            if filters.get("role") == "eq.admin":
+                return [{"id": "admin-1"}]
+            return [{"id": "coach-1"}]
+
+        async def insert(self, table: str, payload: dict):
+            self.audit.append(payload)
+            return payload
+
+    changes: list[tuple[str, bool]] = []
+
+    async def set_access(user_id: str, enabled: bool):
+        changes.append((user_id, enabled))
+        return {"id": user_id}
+
+    database = AdminDatabase()
+    monkeypatch.setattr(main_module, "db", database)
+    monkeypatch.setattr(main_module, "auth_admin_set_user_access", set_access)
+
+    row = asyncio.run(main_module.admin_user_access(
+        "coach-1",
+        main_module.UserAccessRequest(enabled=False),
+        AuthUser(id="admin-1"),
+    ))
+
+    assert row == {"id": "coach-1", "access_enabled": False}
+    assert changes == [("coach-1", False)]
+    assert database.audit[0]["action"] == "user.access.revoked"
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(main_module.admin_user_access(
+            "admin-1",
+            main_module.UserAccessRequest(enabled=False),
+            AuthUser(id="admin-1"),
+        ))
+    assert error.value.status_code == 409
+
+
 def test_protected_routes_require_a_bearer_token() -> None:
     response = client.get("/api/v1/me")
     assert response.status_code == 401

@@ -113,6 +113,51 @@ class SupabaseAdmin:
 db = SupabaseAdmin()
 
 
+def _auth_admin_headers() -> dict[str, str]:
+    if not settings.supabase_url or not settings.supabase_secret_key:
+        raise HTTPException(503, "Supabase Auth no está configurado")
+    return {
+        "apikey": settings.supabase_secret_key,
+        "Authorization": f"Bearer {settings.supabase_secret_key}",
+        "Content-Type": "application/json",
+    }
+
+
+async def auth_admin_list_users() -> list[dict[str, Any]]:
+    """List Auth users from the trusted API layer without exposing the secret key."""
+    users: list[dict[str, Any]] = []
+    page = 1
+    async with httpx.AsyncClient(timeout=15) as client:
+        while True:
+            response = await client.get(
+                f"{settings.supabase_url.rstrip('/')}/auth/v1/admin/users",
+                headers=_auth_admin_headers(),
+                params={"page": page, "per_page": 1000},
+            )
+            if response.status_code >= 400:
+                raise HTTPException(response.status_code, "No se pudo consultar el directorio de usuarios")
+            payload = response.json()
+            current_page = payload.get("users", []) if isinstance(payload, dict) else []
+            users.extend(current_page)
+            if len(current_page) < 1000:
+                return users
+            page += 1
+
+
+async def auth_admin_set_user_access(user_id: str, enabled: bool) -> dict[str, Any]:
+    """Ban or unban an Auth user using Supabase's server-only Admin API."""
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.put(
+            f"{settings.supabase_url.rstrip('/')}/auth/v1/admin/users/{user_id}",
+            headers=_auth_admin_headers(),
+            json={"ban_duration": "none" if enabled else "876000h"},
+        )
+    if response.status_code >= 400:
+        detail = response.json().get("message", "No se pudo actualizar el acceso") if response.content else "No se pudo actualizar el acceso"
+        raise HTTPException(response.status_code, detail)
+    return response.json()
+
+
 async def storage_signed_url(bucket: str, path: str, expires_in: int = 300) -> str:
     if not db.ready:
         raise HTTPException(503, "La base de datos no está configurada")

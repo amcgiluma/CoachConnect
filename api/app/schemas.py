@@ -208,6 +208,10 @@ class VerificationRequest(BaseModel):
     note: str = Field(default="", max_length=1000)
 
 
+class UserAccessRequest(BaseModel):
+    enabled: bool
+
+
 class OAuthUrlResponse(BaseModel):
     provider: str
     url: str

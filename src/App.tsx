@@ -37,6 +37,16 @@ type ChatMessage = { id: string; conversation_id: string; sender_id: string; bod
 type CoachServiceRecord = { id: string; category_id: string; name: string; description: string; mode: Mode; duration_minutes: number; price_cents: number; package_size: number; active: boolean; categories?: { slug?: string; name_es?: string } | null }
 type CoachProfileRecord = { user_id: string; headline: string; bio: string; city?: string | null; mode: Mode; verification_status: string; responds_now: boolean; rating: number; review_count: number; languages?: string[]; preferred_video_provider?: 'meet' | 'zoom' | 'custom'; profiles?: { display_name?: string; avatar_url?: string | null } | null; coach_services?: CoachServiceRecord[] }
 type BookingRecord = { id: string; starts_at: string; ends_at: string; status: string; amount_cents: number; video_url?: string | null; coach_services?: { name?: string; duration_minutes?: number } | null; profiles?: { display_name?: string } | null }
+type CredentialStatus = {
+  verification_status: string; verification_note?: string | null; video_path?: string | null
+  video_status: string; video_review_note?: string | null; updated_at: string
+  credential?: { id: string; title: string; status: string; review_note?: string | null; created_at: string; reviewed_at?: string | null } | null
+}
+type AdminUser = {
+  id: string; display_name: string; email?: string | null; role: Profile['role']; created_at?: string | null
+  last_sign_in_at?: string | null; access_enabled: boolean
+  coach?: { user_id: string; verification_status: string; verification_note?: string | null } | null
+}
 const CoachMap = lazy(() => import('./components/CoachMap').then((module) => ({ default: module.CoachMap })))
 
 const mergeMessage = (items: ChatMessage[], row: ChatMessage) =>
@@ -132,20 +142,37 @@ function CoachConnect() {
 
 function Header({ onAuth }: { onAuth: () => void }) {
   const { user, signOut } = useAuth()
+  const [logoutOpen, setLogoutOpen] = useState(false)
+  const [logoutBusy, setLogoutBusy] = useState(false)
   const { t, i18n } = useTranslation()
   const currentLanguage = i18n.resolvedLanguage || i18n.language || 'es'
   const toggleLanguage = () => void i18n.changeLanguage(currentLanguage.startsWith('es') ? 'en' : 'es')
-  return <header className="topbar">
+  const confirmLogout = async () => {
+    setLogoutBusy(true)
+    try { await signOut(); setLogoutOpen(false); toast.success('Sesión cerrada') }
+    catch { toast.error('No se pudo cerrar la sesión') }
+    finally { setLogoutBusy(false) }
+  }
+  return <><header className="topbar">
     <Link className="brand" to="/" aria-label="Volver a CoachConnect"><span className="brand-mark"><span /></span><span>Coach<span className="brand-link">Connect</span></span></Link>
     <nav className="top-actions" aria-label="Navegación principal">
       <button className="language-toggle" onClick={toggleLanguage}>{currentLanguage.startsWith('es') ? 'EN' : 'ES'}</button>
       <Link className="text-button subtle coach-nav-link" to="/profesional" aria-label={t('nav.coach')}><Zap /><span>{t('nav.coach')}</span></Link>
       {user && <Link className="text-button subtle desktop-account" to="/mensajes">{t('nav.messages')}</Link>}
       {user && <Link className="icon-button" to="/notificaciones" aria-label={t('nav.notifications')}><Bell /></Link>}
-      {user ? <div className="user-actions"><Link className="login-button" to="/cuenta"><UserRound /> {t('nav.account')}</Link><button className="icon-button logout-button" onClick={() => signOut()} aria-label="Cerrar sesión"><LogOut /></button></div>
+      {user ? <div className="user-actions"><Link className="login-button" to="/cuenta"><UserRound /> {t('nav.account')}</Link><button className="icon-button logout-button" onClick={() => setLogoutOpen(true)} aria-label="Cerrar sesión"><LogOut /></button></div>
         : <button className="login-button" onClick={onAuth}><UserRound /> {t('nav.login')}</button>}
     </nav>
-  </header>
+  </header>{logoutOpen && <ConfirmDialog title="¿Cerrar sesión?" copy="Tendrás que volver a identificarte para acceder a tus reservas, mensajes y perfil." confirmLabel="Sí, cerrar sesión" busy={logoutBusy} onCancel={() => setLogoutOpen(false)} onConfirm={confirmLogout} />}</>
+}
+
+function ConfirmDialog({ title, copy, confirmLabel, busy, onCancel, onConfirm }: { title: string; copy: string; confirmLabel: string; busy?: boolean; onCancel: () => void; onConfirm: () => void }) {
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape' && !busy) onCancel() }
+    document.addEventListener('keydown', closeOnEscape)
+    return () => document.removeEventListener('keydown', closeOnEscape)
+  }, [busy, onCancel])
+  return <div className="modal-backdrop confirm-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onCancel() }}><section className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title"><div className="confirm-icon"><LogOut /></div><p className="eyebrow">Confirmación</p><h2 id="confirm-title">{title}</h2><p>{copy}</p><div className="confirm-actions"><button type="button" onClick={onCancel} disabled={busy}>Cancelar</button><Button onClick={onConfirm} disabled={busy} autoFocus>{busy && <LoaderCircle className="spin" />} {confirmLabel}</Button></div></section></div>
 }
 
 function Home() {
@@ -867,9 +894,52 @@ function AvailabilityForm() {
 function CredentialForm({ userId }: { userId: string }) {
   const [busy, setBusy] = useState(false)
   const [videoBusy, setVideoBusy] = useState(false)
-  const upload = async (event: React.ChangeEvent<HTMLInputElement>) => { const file = event.target.files?.[0]; if (!file) return; setBusy(true); const path = `${userId}/${crypto.randomUUID()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, '-')}`; const { error } = await supabase.storage.from('credentials').upload(path, file); if (error) { toast.error(error.message); setBusy(false); return } try { await api('/api/v1/coach/credentials', { method: 'POST', body: JSON.stringify({ title: file.name, kind: 'qualification', storage_path: path }) }); toast.success('Título enviado para revisión manual') } catch (apiError) { toast.error(apiError instanceof Error ? apiError.message : 'No se pudo registrar') } finally { setBusy(false) } }
-  const uploadVideo = async (event: React.ChangeEvent<HTMLInputElement>) => { const file = event.target.files?.[0]; if (!file) return; setVideoBusy(true); const path = `${userId}/${crypto.randomUUID()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, '-')}`; const { error } = await supabase.storage.from('coach-videos').upload(path, file); if (error) { toast.error(error.message); setVideoBusy(false); return } try { await api('/api/v1/coach/video', { method: 'POST', body: JSON.stringify({ storage_path: path }) }); toast.success('Vídeo enviado para revisión') } catch (apiError) { toast.error(apiError instanceof Error ? apiError.message : 'No se pudo registrar el vídeo') } finally { setVideoBusy(false) } }
-  return <section className="credential-panel"><div className="coming-icon"><FileCheck2 /></div><p className="eyebrow">Doble validación</p><h2 className="form-title">Acredita lo que haces.</h2><p className="form-intro">Primero comprobamos que has aportado un título. Después, el equipo de CoachConnect lo revisa manualmente. Los archivos son privados.</p><label className="upload-box"><Upload /><strong>{busy ? 'Subiendo…' : 'Subir título o acreditación'}</strong><span>PDF, JPG o PNG · máximo 10 MB</span><input type="file" accept=".pdf,image/jpeg,image/png" onChange={upload} disabled={busy} /></label><label className="upload-box video-upload"><Video /><strong>{videoBusy ? 'Subiendo vídeo…' : 'Añadir vídeo promocional opcional'}</strong><span>MP4 o WebM · revisión manual antes de publicar</span><input type="file" accept="video/mp4,video/webm" onChange={uploadVideo} disabled={videoBusy} /></label></section>
+  const [status, setStatus] = useState<CredentialStatus | null>(null)
+  const [loaded, setLoaded] = useState(false)
+  const [loadError, setLoadError] = useState('')
+  const refresh = async () => {
+    try { setStatus(await api<CredentialStatus>('/api/v1/coach/credentials/status')); setLoadError('') }
+    catch (error) { setLoadError(error instanceof Error ? error.message : 'No pudimos consultar la validación') }
+    finally { setLoaded(true) }
+  }
+  useEffect(() => { void refresh() }, [])
+  const upload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget
+    const file = input.files?.[0]
+    if (!file) return
+    setBusy(true)
+    const path = `${userId}/${crypto.randomUUID()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, '-')}`
+    const { error } = await supabase.storage.from('credentials').upload(path, file)
+    if (error) { toast.error(error.message); setBusy(false); return }
+    try {
+      await api('/api/v1/coach/credentials', { method: 'POST', body: JSON.stringify({ title: file.name, kind: 'qualification', storage_path: path }) })
+      await refresh()
+      toast.success('Título enviado para revisión manual')
+    } catch (apiError) { toast.error(apiError instanceof Error ? apiError.message : 'No se pudo registrar') }
+    finally { setBusy(false); input.value = '' }
+  }
+  const uploadVideo = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget
+    const file = input.files?.[0]
+    if (!file) return
+    setVideoBusy(true)
+    const path = `${userId}/${crypto.randomUUID()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, '-')}`
+    const { error } = await supabase.storage.from('coach-videos').upload(path, file)
+    if (error) { toast.error(error.message); setVideoBusy(false); return }
+    try {
+      await api('/api/v1/coach/video', { method: 'POST', body: JSON.stringify({ storage_path: path }) })
+      await refresh()
+      toast.success('Vídeo enviado para revisión')
+    } catch (apiError) { toast.error(apiError instanceof Error ? apiError.message : 'No se pudo registrar el vídeo') }
+    finally { setVideoBusy(false); input.value = '' }
+  }
+  if (!loaded) return <LoadingBlock label="Consultando tu validación" />
+  const hasCredential = Boolean(status?.credential)
+  const hasVideo = Boolean(status?.video_path)
+  const waiting = status?.verification_status === 'credentials_submitted' || status?.verification_status === 'under_review' || status?.credential?.status === 'pending' || status?.video_status === 'pending'
+  const progress = status?.verification_status === 'verified' ? 100 : status?.verification_status === 'under_review' ? 85 : Math.min(75, 15 + (hasCredential ? 35 : 0) + (hasVideo ? 25 : 0))
+  const videoName = status?.video_path?.split('/').pop()?.replace(/^[0-9a-f-]{36}-/i, '')
+  return <section className="credential-panel"><div className="coming-icon"><FileCheck2 /></div><p className="eyebrow">Doble validación</p><h2 className="form-title">Acredita lo que haces.</h2><p className="form-intro">Revisamos manualmente tu acreditación y el vídeo que quieras publicar. Los archivos son privados y solo el equipo de validación puede abrirlos.</p>{loadError && <p className="form-error" role="alert">{loadError}</p>}{status && <section className={`validation-progress status-${status.verification_status}`} aria-labelledby="validation-progress-title"><div className="validation-progress-head"><div><p className="eyebrow">Estado de la solicitud</p><h3 id="validation-progress-title">{status.verification_status === 'verified' ? 'Validación completada' : status.verification_status === 'rejected' ? 'Necesitamos que hagas un cambio' : status.verification_status === 'suspended' ? 'Validación pausada' : waiting ? 'Estamos revisando tus archivos' : 'Prepara tu documentación'}</h3></div><strong>{progress}%</strong></div><div className="validation-progress-bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span style={{ width: `${progress}%` }} /></div>{waiting && <p><Clock3 /> Tu título y tu vídeo están en proceso de validación. Tendrás respuesta en un máximo de 3 días hábiles.</p>}{status.verification_status === 'verified' && <p><BadgeCheck /> Tu título está validado y tu perfil profesional puede publicarse.</p>}{['rejected', 'suspended'].includes(status.verification_status) && <p><ShieldCheck /> {status.verification_note || 'El equipo revisará contigo los cambios necesarios.'}</p>}<ol><li className={hasCredential ? 'done' : ''}><span>1</span> Acreditación enviada</li><li className={waiting || status.verification_status === 'verified' ? 'done' : ''}><span>2</span> Revisión manual</li><li className={status.verification_status === 'verified' ? 'done' : ''}><span>3</span> Perfil validado</li></ol></section>}<div className="credential-files"><label className={`upload-box ${hasCredential ? 'has-file' : ''}`}><FileCheck2 /><strong>{busy ? 'Subiendo…' : hasCredential ? 'Cambiar título o acreditación' : 'Subir título o acreditación'}</strong>{hasCredential ? <span><b>{status?.credential?.title}</b> · {status?.credential?.status === 'pending' ? 'Pendiente de revisión' : status?.credential?.status}</span> : <span>PDF, JPG o PNG · máximo 10 MB</span>}<small>{hasCredential ? 'Pulsa para editarlo y volver a enviarlo a validación.' : 'Necesario para validar tu perfil.'}</small><input type="file" accept=".pdf,image/jpeg,image/png" onChange={upload} disabled={busy || status?.verification_status === 'suspended'} /></label><label className={`upload-box video-upload ${hasVideo ? 'has-file' : ''}`}><Video /><strong>{videoBusy ? 'Subiendo vídeo…' : hasVideo ? 'Cambiar vídeo' : 'Añadir vídeo promocional'}</strong>{hasVideo ? <span><b>{videoName || 'Vídeo enviado'}</b> · {status?.video_status === 'pending' ? 'Pendiente de revisión' : status?.video_status}</span> : <span>MP4 o WebM · máximo 100 MB</span>}<small>{hasVideo ? 'Pulsa para editarlo y enviarlo de nuevo.' : 'Opcional; se revisará antes de publicarse.'}</small><input type="file" accept="video/mp4,video/webm" onChange={uploadVideo} disabled={videoBusy || status?.verification_status === 'suspended'} /></label></div></section>
 }
 
 function Integrations() {
@@ -894,6 +964,12 @@ function Admin() {
   const [catalog, setCatalog] = useState<any[]>([])
   const [bookings, setBookings] = useState<any[]>([])
   const [payments, setPayments] = useState<any[]>([])
+  const [users, setUsers] = useState<AdminUser[]>([])
+  const [userQuery, setUserQuery] = useState('')
+  const [roleFilter, setRoleFilter] = useState('all')
+  const [accessFilter, setAccessFilter] = useState('all')
+  const [verificationFilter, setVerificationFilter] = useState('all')
+  const [adminError, setAdminError] = useState('')
   const [tab, setTab] = useState('validation')
   useEffect(() => {
     if (!user) return
@@ -907,16 +983,41 @@ function Admin() {
         api<any[]>('/api/v1/admin/categories').then(setCatalog),
         api<any[]>('/api/v1/admin/bookings').then(setBookings),
         api<any[]>('/api/v1/admin/payments').then(setPayments),
-      ])
+        api<AdminUser[]>('/api/v1/admin/users').then(setUsers),
+      ]).catch((error) => setAdminError(error instanceof Error ? error.message : 'No se pudo cargar el panel'))
     }).catch(() => undefined)
   }, [user])
+  const filteredUsers = useMemo(() => users.filter((item) => {
+    const query = userQuery.trim().toLocaleLowerCase('es')
+    const matchesQuery = !query || item.display_name.toLocaleLowerCase('es').includes(query) || item.email?.toLocaleLowerCase('es').includes(query)
+    const matchesRole = roleFilter === 'all' || item.role === roleFilter
+    const matchesAccess = accessFilter === 'all' || (accessFilter === 'active' ? item.access_enabled : !item.access_enabled)
+    const matchesVerification = verificationFilter === 'all' || (verificationFilter === 'not_coach' ? !item.coach : item.coach?.verification_status === verificationFilter)
+    return matchesQuery && matchesRole && matchesAccess && matchesVerification
+  }), [users, userQuery, roleFilter, accessFilter, verificationFilter])
   if (!user || profile?.role !== 'admin') return <section className="access-denied"><ShieldCheck /><h1>Área de operaciones.</h1><p>Solo las cuentas administradoras pueden revisar títulos y validar entrenadores.</p></section>
   const openPrivate = async (path: string) => { try { const result = await api<{ url: string }>(path); window.open(result.url, '_blank', 'noopener,noreferrer') } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo abrir') } }
-  const reviewCoach = async (coachId: string, status: 'verified' | 'rejected') => { await api(`/api/v1/admin/coaches/${coachId}/verification`, { method: 'PATCH', body: JSON.stringify({ status, note: status === 'verified' ? 'Documentación revisada' : 'Revisar documentación' }) }); setDocs((items) => items.filter((item) => item.coach_id !== coachId)); toast.success(status === 'verified' ? 'Entrenador verificado' : 'Documentación rechazada') }
-  const reviewVideo = async (coachId: string, status: 'approved' | 'rejected') => { await api(`/api/v1/admin/videos/${coachId}`, { method: 'PATCH', body: JSON.stringify({ status, note: '' }) }); setVideos((items) => items.filter((item) => item.user_id !== coachId)) }
+  const setCoachStatus = async (coachId: string, status: 'verified' | 'rejected' | 'suspended', note: string) => {
+    try {
+      await api(`/api/v1/admin/coaches/${coachId}/verification`, { method: 'PATCH', body: JSON.stringify({ status, note }) })
+      setUsers((items) => items.map((item) => item.id === coachId && item.coach ? { ...item, coach: { ...item.coach, verification_status: status, verification_note: note } } : item))
+      if (status === 'verified' || status === 'rejected') setDocs((items) => items.filter((item) => item.coach_id !== coachId))
+      toast.success(status === 'verified' ? 'Entrenador validado' : status === 'suspended' ? 'Validez profesional retirada' : 'Documentación rechazada')
+    } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo actualizar la validación') }
+  }
+  const reviewVideo = async (coachId: string, status: 'approved' | 'rejected') => { try { await api(`/api/v1/admin/videos/${coachId}`, { method: 'PATCH', body: JSON.stringify({ status, note: '' }) }); setVideos((items) => items.filter((item) => item.user_id !== coachId)); toast.success(status === 'approved' ? 'Vídeo aprobado' : 'Vídeo rechazado') } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo revisar el vídeo') } }
+  const setUserAccess = async (item: AdminUser) => {
+    const enabled = !item.access_enabled
+    try {
+      await api(`/api/v1/admin/users/${item.id}/access`, { method: 'PATCH', body: JSON.stringify({ enabled }) })
+      setUsers((items) => items.map((current) => current.id === item.id ? { ...current, access_enabled: enabled } : current))
+      toast.success(enabled ? 'Acceso restaurado' : 'Acceso revocado')
+    } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo cambiar el acceso') }
+  }
   const resolveReport = async (id: string) => { await api(`/api/v1/admin/reports/${id}?status_value=resolved`, { method: 'PATCH' }); setReports((items) => items.filter((item) => item.id !== id)) }
   const createCategory = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const formElement = event.currentTarget; const form = new FormData(formElement); const payload = { slug: form.get('slug'), name_es: form.get('name_es'), name_en: form.get('name_en'), sort_order: Number(form.get('sort_order')), active: true }; try { const row = await api('/api/v1/admin/categories', { method: 'POST', body: JSON.stringify(payload) }); setCatalog((items) => [...items, row]); formElement.reset() } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo crear') } }
-  return <section className="admin-screen"><p className="eyebrow">CoachConnect Ops</p><h1>Operaciones.</h1><div className="admin-tabs">{[['validation', 'Validación'], ['moderation', 'Moderación'], ['catalog', 'Taxonomía'], ['matching', 'Matching'], ['business', 'Reservas y pagos']].map(([key, label]) => <button className={tab === key ? 'active' : ''} onClick={() => setTab(key)} key={key}>{label}</button>)}</div>{tab === 'validation' && <><h2>Documentación profesional</h2><div className="admin-list">{docs.map((item) => <article key={item.id}><FileCheck2 /><div><strong>{item.title}</strong><span>{item.status} · {new Date(item.created_at).toLocaleDateString('es-ES')}</span></div><div><button onClick={() => openPrivate(`/api/v1/admin/credentials/${item.id}/download`)}>Abrir</button><button onClick={() => reviewCoach(item.coach_id, 'verified')}>Aprobar</button><button onClick={() => reviewCoach(item.coach_id, 'rejected')}>Rechazar</button></div></article>)}</div><h2>Vídeos pendientes</h2><div className="admin-list">{videos.map((item) => <article key={item.user_id}><Video /><div><strong>{item.profiles?.display_name || 'Entrenador'}</strong><span>Vídeo promocional pendiente</span></div><div><button onClick={() => openPrivate(`/api/v1/admin/videos/${item.user_id}/download`)}>Abrir</button><button onClick={() => reviewVideo(item.user_id, 'approved')}>Aprobar</button><button onClick={() => reviewVideo(item.user_id, 'rejected')}>Rechazar</button></div></article>)}</div></>}{tab === 'moderation' && <div className="admin-list">{reports.map((item) => <article key={item.id}><ShieldCheck /><div><strong>{item.reason}</strong><span>{item.details || 'Sin detalle'} · {item.status}</span></div><div><button onClick={() => resolveReport(item.id)}>Resolver</button></div></article>)}</div>}{tab === 'catalog' && <><form className="admin-form" onSubmit={createCategory}><input name="slug" placeholder="slug" required /><input name="name_es" placeholder="Nombre ES" required /><input name="name_en" placeholder="Name EN" required /><input name="sort_order" type="number" defaultValue="100" /><Button type="submit">Crear categoría</Button></form><div className="compact-list">{catalog.map((item) => <div key={item.id}><strong>{item.name_es}</strong><span>{item.name_en} · {item.slug}</span></div>)}</div></>}{tab === 'matching' && <><h2>Orden de matching</h2><div className="compact-list">{['1. Especialidad', '2. Zona indicada', '3. Valoraciones', '4. Rapidez de respuesta'].map((criterion) => <div key={criterion}><strong>{criterion}</strong><span>Prioridad fija</span></div>)}</div></>}{tab === 'business' && <div className="metric-grid"><div><span>Reservas</span><strong>{bookings.length}</strong><small>{bookings.filter((item) => item.status === 'confirmed').length} confirmadas</small></div><div><span>Volumen pagado</span><strong>{(payments.filter((item) => item.status === 'paid').reduce((sum, item) => sum + item.amount_cents, 0) / 100).toFixed(0)} €</strong><small>{payments.length} pagos</small></div><div><span>Comisión</span><strong>{(payments.filter((item) => item.status === 'paid').reduce((sum, item) => sum + item.platform_fee_cents, 0) / 100).toFixed(0)} €</strong><small>Ingresos de plataforma</small></div></div>}</section>
+  const verificationLabels: Record<string, string> = { draft: 'Sin enviar', credentials_submitted: 'Pendiente', under_review: 'En revisión', verified: 'Válido', rejected: 'Rechazado', suspended: 'Suspendido' }
+  return <section className="admin-screen"><p className="eyebrow">CoachConnect Ops</p><h1>Operaciones.</h1>{adminError && <p className="form-error" role="alert">{adminError}</p>}<div className="admin-tabs">{[['validation', 'Validación'], ['users', 'Usuarios'], ['moderation', 'Moderación'], ['catalog', 'Taxonomía'], ['matching', 'Matching'], ['business', 'Reservas y pagos']].map(([key, label]) => <button className={tab === key ? 'active' : ''} onClick={() => setTab(key)} key={key}>{label}</button>)}</div>{tab === 'validation' && <><h2>Documentación profesional</h2><div className="admin-list">{docs.map((item) => <article key={item.id}><FileCheck2 /><div><strong>{item.profile?.display_name || 'Entrenador sin nombre'}</strong><span>{item.title} · enviado el {new Date(item.created_at).toLocaleDateString('es-ES')} · ID {item.coach_id.slice(0, 8)}</span></div><div><button onClick={() => openPrivate(`/api/v1/admin/credentials/${item.id}/download`)}>Abrir</button><button onClick={() => setCoachStatus(item.coach_id, 'verified', 'Documentación revisada')}>Aprobar</button><button onClick={() => setCoachStatus(item.coach_id, 'rejected', 'Revisa y vuelve a enviar tu documentación')}>Rechazar</button></div></article>)}{!docs.length && <Empty title="Sin títulos pendientes." copy="Las nuevas acreditaciones aparecerán aquí con el nombre del entrenador." />}</div><h2>Vídeos pendientes</h2><div className="admin-list">{videos.map((item) => <article key={item.user_id}><Video /><div><strong>{item.profiles?.display_name || 'Entrenador sin nombre'}</strong><span>Vídeo promocional pendiente · ID {item.user_id.slice(0, 8)}</span></div><div><button onClick={() => openPrivate(`/api/v1/admin/videos/${item.user_id}/download`)}>Abrir</button><button onClick={() => reviewVideo(item.user_id, 'approved')}>Aprobar</button><button onClick={() => reviewVideo(item.user_id, 'rejected')}>Rechazar</button></div></article>)}{!videos.length && <Empty title="Sin vídeos pendientes." copy="Los vídeos enviados para revisión aparecerán aquí." />}</div></>}{tab === 'users' && <><div className="admin-users-head"><div><h2>Usuarios y accesos</h2><p>{filteredUsers.length} de {users.length} usuarios</p></div></div><div className="admin-user-filters"><label><span>Buscar</span><input value={userQuery} onChange={(event) => setUserQuery(event.target.value)} placeholder="Nombre o email" /></label><label><span>Tipo</span><select value={roleFilter} onChange={(event) => setRoleFilter(event.target.value)}><option value="all">Todos</option><option value="coach">Entrenadores</option><option value="consumer">Clientes</option><option value="admin">Administradores</option></select></label><label><span>Acceso</span><select value={accessFilter} onChange={(event) => setAccessFilter(event.target.value)}><option value="all">Todos</option><option value="active">Con acceso</option><option value="revoked">Revocados</option></select></label><label><span>Validez profesional</span><select value={verificationFilter} onChange={(event) => setVerificationFilter(event.target.value)}><option value="all">Cualquier estado</option><option value="verified">Válidos</option><option value="credentials_submitted">Pendientes</option><option value="under_review">En revisión</option><option value="rejected">Rechazados</option><option value="suspended">Suspendidos</option><option value="not_coach">No entrenadores</option></select></label></div><div className="admin-user-list">{filteredUsers.map((item) => <article className={!item.access_enabled ? 'access-revoked' : ''} key={item.id}><div className="admin-user-avatar">{item.display_name.slice(0, 2).toUpperCase()}</div><div className="admin-user-identity"><strong>{item.display_name}</strong><span>{item.email || 'Email no disponible'}</span><small>Alta: {item.created_at ? new Date(item.created_at).toLocaleDateString('es-ES') : 'sin fecha'}</small></div><div className="admin-user-badges"><span className={`role-badge role-${item.role}`}>{item.role === 'coach' ? 'Entrenador' : item.role === 'admin' ? 'Administrador' : 'Cliente'}</span><span className={`access-badge ${item.access_enabled ? 'active' : 'revoked'}`}>{item.access_enabled ? 'Acceso activo' : 'Acceso revocado'}</span>{item.coach && <span className={`status-pill status-${item.coach.verification_status}`}>{verificationLabels[item.coach.verification_status] || item.coach.verification_status}</span>}</div><div className="admin-user-actions">{item.coach && <button onClick={() => setCoachStatus(item.id, item.coach?.verification_status === 'verified' ? 'suspended' : 'verified', item.coach?.verification_status === 'verified' ? 'Validez retirada por administración' : 'Validez concedida por administración')}>{item.coach.verification_status === 'verified' ? 'Retirar validez' : 'Dar validez'}</button>}<button className={item.access_enabled ? 'danger-action' : ''} disabled={item.id === user.id && item.access_enabled} title={item.id === user.id && item.access_enabled ? 'No puedes revocar tu propia cuenta' : undefined} onClick={() => setUserAccess(item)}>{item.access_enabled ? 'Revocar acceso' : 'Restaurar acceso'}</button></div></article>)}{!filteredUsers.length && <Empty title="Ningún usuario coincide." copy="Prueba a cambiar los filtros o el texto de búsqueda." />}</div></>}{tab === 'moderation' && <div className="admin-list">{reports.map((item) => <article key={item.id}><ShieldCheck /><div><strong>{item.reason}</strong><span>{item.details || 'Sin detalle'} · {item.status}</span></div><div><button onClick={() => resolveReport(item.id)}>Resolver</button></div></article>)}</div>}{tab === 'catalog' && <><form className="admin-form" onSubmit={createCategory}><input name="slug" placeholder="slug" required /><input name="name_es" placeholder="Nombre ES" required /><input name="name_en" placeholder="Name EN" required /><input name="sort_order" type="number" defaultValue="100" /><Button type="submit">Crear categoría</Button></form><div className="compact-list">{catalog.map((item) => <div key={item.id}><strong>{item.name_es}</strong><span>{item.name_en} · {item.slug}</span></div>)}</div></>}{tab === 'matching' && <><h2>Orden de matching</h2><div className="compact-list">{['1. Especialidad', '2. Zona indicada', '3. Valoraciones', '4. Rapidez de respuesta'].map((criterion) => <div key={criterion}><strong>{criterion}</strong><span>Prioridad fija</span></div>)}</div></>}{tab === 'business' && <div className="metric-grid"><div><span>Reservas</span><strong>{bookings.length}</strong><small>{bookings.filter((item) => item.status === 'confirmed').length} confirmadas</small></div><div><span>Volumen pagado</span><strong>{(payments.filter((item) => item.status === 'paid').reduce((sum, item) => sum + item.amount_cents, 0) / 100).toFixed(0)} €</strong><small>{payments.length} pagos</small></div><div><span>Comisión</span><strong>{(payments.filter((item) => item.status === 'paid').reduce((sum, item) => sum + item.platform_fee_cents, 0) / 100).toFixed(0)} €</strong><small>Ingresos de plataforma</small></div></div>}</section>
 }
 
 function AuthRequired({ onAuth, title, coach = false }: { onAuth: () => void; title: string; coach?: boolean }) {
