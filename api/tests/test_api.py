@@ -7,6 +7,7 @@ from fastapi import BackgroundTasks, HTTPException
 from starlette.requests import Request
 
 import app.main as main_module
+import app.services as services_module
 from app.main import app
 from app.schemas import AuthUser, CoachSummary, MatchRequest, MessageCreateRequest, ServiceMode
 
@@ -212,6 +213,62 @@ def test_checkout_rejects_untrusted_return_origin() -> None:
     })
 
     assert main_module.frontend_url_for_request(request) == main_module.settings.frontend_url.rstrip("/")
+
+
+def test_stripe_account_is_only_ready_when_charges_and_payouts_are_enabled(monkeypatch) -> None:
+    monkeypatch.setattr(services_module.settings, "stripe_secret_key", "sk_test_example")
+    monkeypatch.setattr(
+        services_module.stripe.Account,
+        "retrieve",
+        lambda _: {
+            "details_submitted": False,
+            "charges_enabled": False,
+            "payouts_enabled": False,
+            "requirements": {"currently_due": ["external_account", "individual.id_number"]},
+        },
+    )
+
+    state = services_module.stripe_account_status("acct_pending")
+
+    assert state == {"status": "pending", "ready": False, "requirements_due": 2}
+
+
+def test_integrations_does_not_treat_a_saved_stripe_id_as_connected(monkeypatch) -> None:
+    class IntegrationDatabase:
+        async def select(self, table: str, select: str = "*", **filters):
+            if table == "coach_profiles":
+                return [{"stripe_account_id": "acct_pending", "custom_video_url": None}]
+            return []
+
+    monkeypatch.setattr(main_module, "db", IntegrationDatabase())
+    monkeypatch.setattr(
+        main_module,
+        "stripe_account_status",
+        lambda _: {"status": "pending", "ready": False, "requirements_due": 17},
+    )
+
+    result = asyncio.run(main_module.coach_integrations(AuthUser(id="coach-1")))
+
+    assert result["stripe"] is False
+    assert result["stripe_status"] == "pending"
+    assert result["stripe_requirements_due"] == 17
+
+
+def test_zoom_oauth_rejects_a_localhost_callback(monkeypatch) -> None:
+    monkeypatch.setattr(services_module.settings, "zoom_client_id", "zoom-client")
+    monkeypatch.setattr(services_module.settings, "zoom_client_secret", "zoom-secret")
+    monkeypatch.setattr(
+        services_module.settings,
+        "zoom_redirect_uri",
+        "http://localhost:8000/api/v1/integrations/zoom/callback",
+    )
+    monkeypatch.setattr(services_module, "signed_oauth_state", lambda _: "signed-state")
+
+    with pytest.raises(HTTPException) as error:
+        services_module.oauth_url("zoom", "coach-1")
+
+    assert error.value.status_code == 503
+    assert "HTTPS no-localhost" in error.value.detail
 
 
 class ChatDatabase:
