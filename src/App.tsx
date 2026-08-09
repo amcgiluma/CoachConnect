@@ -3,7 +3,7 @@ import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate,
 import { useTranslation } from 'react-i18next'
 import { Toaster, toast } from 'sonner'
 import {
-  ArrowLeft, ArrowRight, BadgeCheck, Bell, CalendarDays, Check, ChevronDown,
+  ArrowLeft, ArrowRight, BadgeCheck, Bell, CalendarDays, Camera, Check, ChevronDown,
   ChevronLeft, ChevronRight, Clock3, CreditCard, Eye, FileCheck2, Globe2, Languages,
   LayoutDashboard, LoaderCircle, LogOut, MapPin, MessageCircle, Paperclip, Pencil,
   Plus, Send, Settings2, ShieldCheck, SlidersHorizontal, Sparkles, Star, Upload,
@@ -31,12 +31,17 @@ type MatchApiCoach = {
 }
 type MatchApiResponse = { items: MatchApiCoach[]; relaxed_filter: string | null }
 type LocalBooking = { id: string; coachId: string; coachName: string; serviceName: string; startsAt: string; amount: number; status: string }
-type Profile = { id: string; display_name: string; role: 'consumer' | 'coach' | 'admin' }
+export type Profile = { id: string; display_name: string; role: 'consumer' | 'coach' | 'admin'; email?: string | null; city?: string | null; avatar_url?: string | null; updated_at?: string }
 type AvailableSlot = { starts_at: string; ends_at: string; label: string }
 type ChatMessage = { id: string; conversation_id: string; sender_id: string; body: string; attachment_path?: string | null; created_at: string; delivery_status?: 'sending' }
 type CoachServiceRecord = { id: string; category_id: string; name: string; description: string; mode: Mode; duration_minutes: number; price_cents: number; package_size: number; active: boolean; categories?: { slug?: string; name_es?: string } | null }
-type CoachProfileRecord = { user_id: string; headline: string; bio: string; city?: string | null; mode: Mode; verification_status: string; responds_now: boolean; rating: number; review_count: number; languages?: string[]; preferred_video_provider?: 'meet' | 'zoom' | 'custom'; profiles?: { display_name?: string; avatar_url?: string | null } | null; coach_services?: CoachServiceRecord[] }
+type CoachProfileRecord = { user_id: string; headline: string; bio: string; city?: string | null; mode: Mode; verification_status: string; responds_now: boolean; rating: number; review_count: number; years_experience?: number; languages?: string[]; preferred_video_provider?: 'meet' | 'zoom' | 'custom'; presentation_video_url?: string | null; profiles?: { display_name?: string; avatar_url?: string | null } | null; coach_services?: CoachServiceRecord[] }
 type BookingRecord = { id: string; starts_at: string; ends_at: string; status: string; amount_cents: number; video_url?: string | null; coach_services?: { name?: string; duration_minutes?: number } | null; profiles?: { display_name?: string } | null }
+type ProfessionalOverviewData = {
+  coachProfile: (CoachProfileRecord & { availability_rules?: any[]; stripe_account_id?: string | null }) | null
+  services: CoachServiceRecord[]
+  bookings: BookingRecord[]
+}
 type CredentialStatus = {
   verification_status: string; verification_note?: string | null; video_path?: string | null
   video_status: string; video_review_note?: string | null; updated_at: string
@@ -93,6 +98,7 @@ const coachFromProfile = (row: CoachProfileRecord, fallback?: Coach): Coach => {
     tags: [row.headline, ...(row.languages || [])].filter(Boolean),
     services,
     videoProvider: row.preferred_video_provider,
+    presentationVideoUrl: row.presentation_video_url || undefined,
   }
 }
 
@@ -108,6 +114,34 @@ const addDays = (value: Date, days: number) => {
   const date = new Date(value)
   date.setDate(date.getDate() + days)
   return date
+}
+
+const startOfDay = (value: Date) => {
+  const date = new Date(value)
+  date.setHours(0, 0, 0, 0)
+  return date
+}
+
+const startOfMonth = (value: Date) => {
+  const date = startOfDay(value)
+  date.setDate(1)
+  return date
+}
+
+const addMonths = (value: Date, months: number) => {
+  const date = new Date(value)
+  date.setDate(1)
+  date.setMonth(date.getMonth() + months)
+  return date
+}
+
+type CalendarView = 'day' | 'week' | 'month'
+
+const calendarDaysFor = (view: CalendarView, anchor: Date) => {
+  if (view === 'day') return [startOfDay(anchor)]
+  if (view === 'week') return Array.from({ length: 7 }, (_, index) => addDays(startOfWeek(anchor), index))
+  const gridStart = startOfWeek(startOfMonth(anchor))
+  return Array.from({ length: 42 }, (_, index) => addDays(gridStart, index))
 }
 
 function App() {
@@ -351,21 +385,18 @@ function toLocationSuggestions(features: PhotonFeature[]): LocationSuggestion[] 
   })
 }
 
-function LocationQuestion({ title, initialValue, onSelect }: { title: string; initialValue?: string; onSelect: (value: string) => void }) {
-  const [locationValue, setLocationValue] = useState(initialValue || '')
-  const [selectedLocation, setSelectedLocation] = useState<LocationSuggestion | null>(null)
+function useLocationLookup(locationValue: string, acceptedLabel?: string) {
   const [suggestions, setSuggestions] = useState<LocationSuggestion[]>([])
   const [lookupState, setLookupState] = useState<'idle' | 'loading' | 'ready' | 'empty' | 'error'>('idle')
   const [retryToken, setRetryToken] = useState(0)
 
   useEffect(() => {
     const query = locationValue.trim()
-    if (selectedLocation?.label === query || query.length < 3) {
+    if (acceptedLabel === query || query.length < 3) {
       setSuggestions([])
-      if (query.length < 3) setLookupState('idle')
+      setLookupState(acceptedLabel === query && query ? 'ready' : 'idle')
       return
     }
-
     const controller = new AbortController()
     const timeout = window.setTimeout(async () => {
       setLookupState('loading')
@@ -390,17 +421,21 @@ function LocationQuestion({ title, initialValue, onSelect }: { title: string; in
         }
       }
     }, 400)
+    return () => { window.clearTimeout(timeout); controller.abort() }
+  }, [acceptedLabel, locationValue, retryToken])
 
-    return () => {
-      window.clearTimeout(timeout)
-      controller.abort()
-    }
-  }, [locationValue, retryToken, selectedLocation])
+  return { suggestions, lookupState, retry: () => setRetryToken((value) => value + 1), clearSuggestions: () => setSuggestions([]), setLookupState }
+}
+
+function LocationQuestion({ title, initialValue, onSelect }: { title: string; initialValue?: string; onSelect: (value: string) => void }) {
+  const [locationValue, setLocationValue] = useState(initialValue || '')
+  const [selectedLocation, setSelectedLocation] = useState<LocationSuggestion | null>(null)
+  const { suggestions, lookupState, retry, clearSuggestions, setLookupState } = useLocationLookup(locationValue, selectedLocation?.label)
 
   const chooseLocation = (suggestion: LocationSuggestion) => {
     setLocationValue(suggestion.label)
     setSelectedLocation(suggestion)
-    setSuggestions([])
+    clearSuggestions()
     setLookupState('ready')
   }
 
@@ -415,7 +450,7 @@ function LocationQuestion({ title, initialValue, onSelect }: { title: string; in
       <div className="location-status" id="location-status" aria-live="polite">
         {lookupState === 'loading' && <span><LoaderCircle className="spin" aria-hidden="true" /> Buscando coincidencias…</span>}
         {lookupState === 'empty' && <span>No encontramos ese lugar. Prueba con el municipio o el código postal.</span>}
-        {lookupState === 'error' && <span>No pudimos consultar las ubicaciones. <button type="button" onClick={() => setRetryToken((value) => value + 1)}>Reintentar</button></span>}
+        {lookupState === 'error' && <span>No pudimos consultar las ubicaciones. <button type="button" onClick={retry}>Reintentar</button></span>}
         {selectedLocation && <span className="location-confirmed"><Check aria-hidden="true" /> Ubicación seleccionada</span>}
       </div>
       <div className="location-suggestions" id="location-suggestions" role="listbox" aria-label="Coincidencias de ubicación">
@@ -425,6 +460,22 @@ function LocationQuestion({ title, initialValue, onSelect }: { title: string; in
     </form>
     <button type="button" className="location-online" onClick={() => onSelect('Cualquier lugar si es online')}><span className="option-icon"><Globe2 aria-hidden="true" /></span><span><strong>Cualquier lugar si es online</strong><small>Buscaremos entrenadores online sin filtrar por zona.</small></span><ArrowRight aria-hidden="true" /></button>
   </div>
+}
+
+function CityAutocompleteField({ initialValue = '', onValueChange }: { initialValue?: string; onValueChange?: (value: string) => void }) {
+  const [displayValue, setDisplayValue] = useState(initialValue)
+  const [cityValue, setCityValue] = useState(initialValue)
+  const [acceptedLabel, setAcceptedLabel] = useState(initialValue)
+  const { suggestions, lookupState, retry, clearSuggestions, setLookupState } = useLocationLookup(displayValue, acceptedLabel)
+  const choose = (suggestion: LocationSuggestion) => {
+    setDisplayValue(suggestion.label)
+    setAcceptedLabel(suggestion.label)
+    setCityValue(suggestion.value)
+    onValueChange?.(suggestion.value)
+    clearSuggestions()
+    setLookupState('ready')
+  }
+  return <div className="pro-location-field wide"><label htmlFor="profile-city">Ciudad o municipio</label><input type="hidden" name="city" value={cityValue} /><div className={`location-input-shell ${cityValue ? 'is-selected' : ''}`}><MapPin aria-hidden="true" /><input id="profile-city" role="combobox" aria-autocomplete="list" aria-expanded={suggestions.length > 0} aria-controls="profile-city-suggestions" value={displayValue} onChange={(event) => { setDisplayValue(event.target.value); setCityValue(''); setAcceptedLabel(''); onValueChange?.(''); setLookupState('idle') }} placeholder="Empieza a escribir tu ciudad" autoComplete="off" /><span className="location-field-state">{cityValue ? <Check aria-label="Ciudad seleccionada" /> : lookupState === 'loading' ? <LoaderCircle className="spin" aria-label="Buscando ciudad" /> : null}</span></div><div className="location-status" aria-live="polite">{lookupState === 'empty' && <span>No encontramos ese lugar.</span>}{lookupState === 'error' && <span>No pudimos consultar las ubicaciones. <button type="button" onClick={retry}>Reintentar</button></span>}</div><div className="location-suggestions" id="profile-city-suggestions" role="listbox" aria-label="Coincidencias de ciudad">{suggestions.map((suggestion) => <button type="button" role="option" aria-selected="false" key={suggestion.id} onClick={() => choose(suggestion)}><MapPin aria-hidden="true" /><span><strong>{suggestion.name}</strong><small>{suggestion.detail}</small></span><ArrowRight aria-hidden="true" /></button>)}</div></div>
 }
 
 function Results() {
@@ -528,7 +579,7 @@ function CoachProfile({ onAuth }: { onAuth: () => void }) {
       return
     }
     if (!isRemoteCoach(coachId)) {
-      setSlots(['Hoy · 18:30', 'Hoy · 20:00', 'Mañana · 08:00', 'Mañana · 17:30', 'Jueves · 09:00', 'Viernes · 19:00'].map((label) => ({ starts_at: label, ends_at: label, label })))
+      setSlots([])
       setSlotsLoading(false)
       return
     }
@@ -589,7 +640,7 @@ function CoachProfile({ onAuth }: { onAuth: () => void }) {
     setChatOpen(true)
   }
   return <section className={`profile-screen ${preview ? 'is-preview' : ''}`}>{preview && <div className="preview-banner"><span><Eye /> Así ven tu perfil los clientes</span><small>La reserva y el contacto están desactivados en la previsualización.</small><Link to="/profesional">Volver a editar</Link></div>}<Link className="back-link" to={preview ? '/profesional' : '/buscar'}><ArrowLeft /> {preview ? 'Volver al panel' : 'Volver a resultados'}</Link><div className="profile-hero"><CoachAvatar coach={coach} className="profile-avatar" eager /><div className="profile-title"><div className="profile-title-line"><h1>{coach.name}</h1>{coach.onlineNow && <span className="live-badge">Disponible ahora</span>}</div><p>{coach.specialty} · {coach.city}</p><div className="profile-rating"><Star fill="currentColor" /><strong>{coach.rating}</strong><span>{coach.reviews} reseñas</span>{coach.verified && <span className="verified-copy"><BadgeCheck /> Identidad y título verificados</span>}</div></div></div>
-    <div className="profile-grid"><div className="profile-details"><section className="profile-block"><p className="eyebrow">Cómo entrena</p><p className="profile-bio">{coach.bio}</p><div className="tag-row large">{coach.tags.map((tag) => <span key={tag}>{tag}</span>)}</div></section><section className="profile-block"><div className="section-title"><p className="eyebrow">Servicios</p>{coach.services.length > 0 && <span>Elige una opción</span>}</div><div className="service-list">{coach.services.map((item, index) => <button className={`service-row ${service === index ? 'selected' : ''}`} onClick={() => setService(index)} key={item.name}><span className="service-radio">{service === index && <Check />}</span><span><strong>{item.name}</strong><small>{item.detail}</small></span><b>{item.price} €</b></button>)}{!coach.services.length && <div className="profile-empty"><CalendarDays /><strong>Aún no hay servicios publicados</strong><span>Así se verá el estado vacío hasta que añadas el primero.</span></div>}</div></section><section className="profile-block review-highlight"><div><p className="eyebrow">Reputación</p><p>{coach.reviews > 0 ? `${coach.rating} sobre 5 en ${coach.reviews} valoraciones.` : 'Este perfil todavía no tiene valoraciones.'}</p><span>{coach.reviews > 0 ? 'Todas proceden de sesiones reservadas en CoachConnect.' : 'Las reseñas aparecerán después de sesiones reales.'}</span></div><Star fill="currentColor" /></section></div>
+    <div className="profile-grid"><div className="profile-details"><section className="profile-block"><p className="eyebrow">Cómo entrena</p><p className="profile-bio">{coach.bio}</p><div className="tag-row large">{coach.tags.map((tag) => <span key={tag}>{tag}</span>)}</div></section><section className="profile-block"><div className="section-title"><p className="eyebrow">Servicios</p>{coach.services.length > 0 && <span>Elige una opción</span>}</div><div className="service-list">{coach.services.map((item, index) => <button className={`service-row ${service === index ? 'selected' : ''}`} onClick={() => setService(index)} key={item.name}><span className="service-radio">{service === index && <Check />}</span><span><strong>{item.name}</strong><small>{item.detail}</small></span><b>{item.price} €</b></button>)}{!coach.services.length && <div className="profile-empty"><CalendarDays /><strong>Aún no hay servicios publicados</strong><span>Así se verá el estado vacío hasta que añadas el primero.</span></div>}</div></section>{coach.presentationVideoUrl && <section className="profile-block presentation-video"><div className="section-title"><div><p className="eyebrow">Conoce a tu entrenador</p><h2>Vídeo de presentación</h2></div><span>Revisado por CoachConnect</span></div><video controls preload="metadata" src={coach.presentationVideoUrl}>Tu navegador no puede reproducir este vídeo.</video></section>}<section className="profile-block review-highlight"><div><p className="eyebrow">Reputación</p><p>{coach.reviews > 0 ? `${coach.rating} sobre 5 en ${coach.reviews} valoraciones.` : 'Este perfil todavía no tiene valoraciones.'}</p><span>{coach.reviews > 0 ? 'Todas proceden de sesiones reservadas en CoachConnect.' : 'Las reseñas aparecerán después de sesiones reales.'}</span></div><Star fill="currentColor" /></section></div>
       <aside className="booking-card"><div className="booking-card-top"><p className="eyebrow">{packageId ? 'Sesión incluida en tu bono' : coach.services[service]?.packageSize && coach.services[service]!.packageSize! > 1 ? 'Tu bono' : 'Tu próxima sesión'}</p><strong>{coach.services.length ? (packageId ? '0 €' : `${coach.services[service]?.price} €`) : 'Sin servicios'}</strong><small>{coach.services[service] ? `${coach.services[service]?.name} · cancelación gratis hasta 24 h antes` : 'Añade un servicio para que puedan reservarte'}</small></div>{!preview && coach.services.length > 0 && (packageId || !coach.services[service]?.packageSize || coach.services[service]!.packageSize! <= 1) && <><p className="calendar-heading"><CalendarDays /> Horarios disponibles</p><AvailabilityCalendar slots={slots} value={slot} onChange={setSlot} loading={slotsLoading} /></>}<Button className="full-button" onClick={reserve} disabled={preview || busy || !coach.verified || !coach.services.length || ((Boolean(packageId) || !coach.services[service]?.packageSize || coach.services[service]!.packageSize! <= 1) && !slots.length)}>{busy && <LoaderCircle className="spin" />} {preview ? 'Vista previa' : coach.verified ? (packageId ? 'Reservar con mi bono' : coach.services[service]?.packageSize && coach.services[service]!.packageSize! > 1 ? 'Comprar bono' : 'Reservar y pagar') : 'Pendiente de verificación'}</Button><button className="chat-cta" onClick={contact} disabled={preview}><MessageCircle /> Preguntar antes de reservar</button><p className="booking-note"><ShieldCheck /> {preview ? 'Completa los pasos de publicación para activar reservas y mensajes.' : 'Pago protegido por Stripe. La dirección exacta nunca se muestra antes de confirmar.'}</p></aside>
     </div>{chatOpen && <QuickChat coach={coach} onClose={() => setChatOpen(false)} />}</section>
 }
@@ -628,14 +679,128 @@ function QuickChat({ coach, onClose }: { coach: Coach; onClose: () => void }) {
   return <div className="modal-backdrop"><section className="chat-sheet" role="dialog" aria-modal="true" aria-labelledby="chat-title"><header><CoachAvatar coach={coach} className="avatar" /><div><p className="eyebrow">Conversación directa</p><h2 id="chat-title">{coach.name}</h2></div><button className="icon-button" onClick={onClose} aria-label="Cerrar chat"><X /></button></header><div className="chat-messages"><div className="message incoming">Hola, cuéntame qué quieres conseguir y qué horarios tienes.</div>{sent.map((item) => <div className={`message outgoing ${item.delivery_status === 'sending' ? 'sending' : ''}`} key={item.id}>{item.body}<small>{item.delivery_status === 'sending' ? 'Enviando…' : new Date(item.created_at).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</small></div>)}</div>{conversationId && <Link className="chat-open-link" to={`/mensajes?conversation=${conversationId}`} onClick={onClose}>Abrir conversación completa <ArrowRight /></Link>}<form className="chat-composer" onSubmit={send}><button type="button" aria-label="Adjuntar archivo" disabled><Paperclip /></button><input aria-label="Mensaje" value={body} onChange={(event) => setBody(event.target.value)} placeholder="Escribe tu mensaje…" disabled={busy} /><button type="submit" aria-label="Enviar" disabled={busy || !body.trim()}>{busy ? <LoaderCircle className="spin" /> : <Send />}</button></form></section></div>
 }
 
-function Account({ onAuth }: { onAuth: () => void }) {
+function ProfileAvatar({ profile, className = '' }: { profile: Pick<Profile, 'display_name' | 'avatar_url'>; className?: string }) {
+  return <span className={`account-avatar ${className}`}>{profile.avatar_url ? <img src={profile.avatar_url} alt={`Foto de ${profile.display_name}`} /> : profile.display_name.slice(0, 2).toUpperCase()}</span>
+}
+
+function ReadonlyAccountEmail({ email }: { email?: string | null }) {
+  return <div className="profile-readonly-field"><span>Correo de la cuenta</span><strong>{email || 'Correo no disponible'}</strong><small>El correo de acceso no se puede editar desde aquí.</small></div>
+}
+
+export function AccountNavigation({ active }: { active: 'profile' | 'messages' | 'professional' }) {
+  const links = [
+    { key: 'profile', label: 'Mi perfil', to: '/cuenta' },
+    { key: 'messages', label: 'Mensajes', to: '/mensajes' },
+    { key: 'professional', label: 'Perfil profesional', to: '/profesional' },
+  ] as const
+  return <nav className={`account-tabs account-tabs-${active}`} aria-label="Secciones de tu cuenta">{links.map((link) => <Link key={link.key} className={active === link.key ? 'active' : undefined} aria-current={active === link.key ? 'page' : undefined} to={link.to}>{link.label}</Link>)}</nav>
+}
+
+export function AccountIdentity({ profile, userId, onSaved }: { profile: Profile; userId: string; onSaved: (profile: Profile) => void }) {
+  const [editing, setEditing] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [avatarBusy, setAvatarBusy] = useState(false)
+  const [avatarUrl, setAvatarUrl] = useState(profile.avatar_url || '')
+  const [stagedAvatarPath, setStagedAvatarPath] = useState<string | null>(null)
+  const nameInputRef = useRef<HTMLInputElement>(null)
+  useEffect(() => {
+    if (!editing) {
+      setAvatarUrl(profile.avatar_url || '')
+      return
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const input = nameInputRef.current
+      if (!input) return
+      input.focus()
+      input.setSelectionRange(input.value.length, input.value.length)
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [editing, profile.avatar_url])
+  const startEditing = () => {
+    setAvatarUrl(profile.avatar_url || '')
+    setEditing(true)
+  }
+  const discardChanges = async () => {
+    if (busy || avatarBusy) return
+    const pathToRemove = stagedAvatarPath
+    setStagedAvatarPath(null)
+    setAvatarUrl(profile.avatar_url || '')
+    setEditing(false)
+    if (pathToRemove) {
+      const { error } = await supabase.storage.from('avatars').remove([pathToRemove])
+      if (error) toast.error('Los cambios se descartaron, pero no se pudo limpiar la foto provisional.')
+    }
+  }
+  const uploadAvatar = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget
+    const file = input.files?.[0]
+    if (!file) return
+    if (!['image/jpeg', 'image/png', 'image/webp', 'image/avif'].includes(file.type) || file.size > 5 * 1024 * 1024) {
+      toast.error('Usa una imagen JPG, PNG, WebP o AVIF de hasta 5 MB.')
+      input.value = ''
+      return
+    }
+    setAvatarBusy(true)
+    const extension = file.name.split('.').pop()?.toLowerCase().replace(/[^a-z0-9]/g, '') || 'jpg'
+    const path = `${userId}/${crypto.randomUUID()}.${extension}`
+    const { error } = await supabase.storage.from('avatars').upload(path, file)
+    if (error) toast.error(error.message)
+    else {
+      const { data } = supabase.storage.from('avatars').getPublicUrl(path)
+      const previousStagedPath = stagedAvatarPath
+      setAvatarUrl(data.publicUrl)
+      setStagedAvatarPath(path)
+      if (previousStagedPath) {
+        const { error: cleanupError } = await supabase.storage.from('avatars').remove([previousStagedPath])
+        if (cleanupError) toast.error('La foto nueva está lista, pero no se pudo limpiar la anterior.')
+      }
+      toast.success('Foto preparada. Guarda los cambios para publicarla.')
+    }
+    setAvatarBusy(false)
+    input.value = ''
+  }
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const form = new FormData(event.currentTarget)
+    const city = String(form.get('city') || '').trim()
+    if (!city) return toast.error('Selecciona una ciudad de la lista de coincidencias.')
+    setBusy(true)
+    try {
+      const updated = await api<Profile>('/api/v1/me', { method: 'PATCH', body: JSON.stringify({ display_name: form.get('display_name'), city, avatar_url: avatarUrl || null }) })
+      onSaved(updated)
+      setStagedAvatarPath(null)
+      setEditing(false)
+      toast.success('Perfil actualizado')
+    } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo actualizar el perfil') }
+    finally { setBusy(false) }
+  }
+  return <section className="account-identity"><div className="account-identity-summary"><ProfileAvatar profile={{ ...profile, avatar_url: avatarUrl }} /><div><p className="eyebrow">Tu perfil</p><h2>{profile.display_name}</h2><span><MapPin /> {profile.city || 'Ubicación pendiente'}</span><span><Globe2 /> {profile.email || 'Correo no disponible'}</span></div><button type="button" className="login-button" disabled={busy || avatarBusy} onClick={editing ? () => void discardChanges() : startEditing}><Pencil /> {editing ? 'Descartar cambios' : 'Editar datos'}</button></div>{editing && <form className="pro-form account-identity-form" onSubmit={submit}><div className="form-grid"><div className="avatar-editor"><ProfileAvatar profile={{ ...profile, avatar_url: avatarUrl }} /><label className="login-button"><Camera /> {avatarBusy ? 'Subiendo…' : 'Cambiar foto'}<input type="file" accept="image/jpeg,image/png,image/webp,image/avif" onChange={uploadAvatar} disabled={avatarBusy} /></label><small>JPG, PNG, WebP o AVIF · máximo 5 MB</small></div><label>Nombre visible<input ref={nameInputRef} name="display_name" required minLength={2} defaultValue={profile.display_name} /></label><ReadonlyAccountEmail email={profile.email} /><CityAutocompleteField initialValue={profile.city || ''} /></div><div className="form-actions"><Button type="submit" disabled={busy || avatarBusy}>{busy && <LoaderCircle className="spin" />} Guardar cambios</Button><button type="button" className="text-button visible-text-button" disabled={busy || avatarBusy} onClick={() => void discardChanges()}>Descartar cambios</button></div></form>}</section>
+}
+
+export function Account({ onAuth }: { onAuth: () => void }) {
   const { user, loading } = useAuth()
   const [profile, setProfile] = useState<Profile | null>(null)
   const [remote, setRemote] = useState<any[]>([])
   const [packages, setPackages] = useState<any[]>([])
+  const [loadedUserId, setLoadedUserId] = useState<string | null>(null)
   const local = useMemo(() => JSON.parse(localStorage.getItem('coachconnect-demo-bookings') || '[]') as LocalBooking[], [])
-  useEffect(() => { if (user) { api<Profile>('/api/v1/me').then(setProfile).catch(() => undefined); api<any[]>('/api/v1/bookings').then(setRemote).catch(() => setRemote([])); api<any[]>('/api/v1/packages').then(setPackages).catch(() => setPackages([])) } }, [user])
-  if (loading) return <LoadingPage />
+  useEffect(() => {
+    if (!user) return
+    let current = true
+    Promise.all([
+      api<Profile>('/api/v1/me').catch(() => null),
+      api<any[]>('/api/v1/bookings').catch(() => []),
+      api<any[]>('/api/v1/packages').catch(() => []),
+    ]).then(([nextProfile, nextRemote, nextPackages]) => {
+      if (!current) return
+      setProfile(nextProfile)
+      setRemote(nextRemote)
+      setPackages(nextPackages)
+      setLoadedUserId(user.id)
+    })
+    return () => { current = false }
+  }, [user])
+  if (loading || (user && loadedUserId !== user.id)) return <LoadingPage />
   if (!user) return <AuthRequired onAuth={onAuth} title="Tus reservas, en un sitio." />
   const cancelBooking = async (bookingId: string) => {
     const reason = window.prompt('¿Por qué quieres cancelar la sesión?') || ''
@@ -652,7 +817,7 @@ function Account({ onAuth }: { onAuth: () => void }) {
       toast.success('Reseña publicada')
     } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo publicar la reseña') }
   }
-  return <section className="account-screen"><div className="account-head"><div><p className="eyebrow">Área personal</p><h1>Hola, {profile?.display_name || user.email?.split('@')[0]}.</h1></div>{profile?.role === 'coach' && <Link className="login-button" to="/profesional"><LayoutDashboard /> Panel profesional</Link>}</div><div className="account-tabs"><Link className="active" to="/cuenta">Reservas</Link><Link to="/mensajes">Mensajes</Link><Link to="/profesional">Perfil profesional</Link></div><section className="booking-list"><div className="section-title"><h2>Próximas sesiones</h2><span>{remote.length + local.length} en total</span></div>{!remote.length && !local.length && <Empty title="Todavía no has reservado." copy="Encuentra a tu entrenador y elige el primer hueco que te venga bien." action={<Link className="button button-primary button-md" to="/">Buscar entrenador</Link>} />}{local.map((item) => <article className="booking-row" key={item.id}><div className="date-block"><strong>{item.startsAt.split(' · ')[0]}</strong><span>{item.startsAt.split(' · ')[1]}</span></div><div><p className="eyebrow">{item.status === 'confirmed' ? 'Confirmada · Demo' : item.status}</p><h3>{item.coachName}</h3><span>{item.serviceName}</span></div><strong>{item.amount} €</strong></article>)}{remote.map((item) => <article className="booking-row" key={item.id}><div className="date-block"><strong>{new Date(item.starts_at).toLocaleDateString('es-ES', { day: '2-digit', month: 'short' })}</strong><span>{new Date(item.starts_at).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</span></div><div><p className="eyebrow">{item.status}</p><h3>{item.coach_profiles?.profiles?.display_name || 'Entrenador CoachConnect'}</h3><span>{item.coach_services?.name}</span></div><strong>{item.amount_cents / 100} €</strong>{item.video_url && <a className="login-button" href={item.video_url} target="_blank" rel="noreferrer"><Video /> Entrar</a>}{['pending_payment', 'confirmed'].includes(item.status) && <button className="text-button" onClick={() => cancelBooking(item.id)}>Cancelar</button>}{item.status === 'completed' && <button className="text-button" onClick={() => reviewBooking(item.id)}>Valorar</button>}</article>)}</section>{packages.length > 0 && <section className="package-list"><div className="section-title"><h2>Mis bonos</h2></div>{packages.map((item) => <article key={item.id}><div><p className="eyebrow">{item.status}</p><h3>{item.coach_services?.name}</h3><span>{item.total_sessions - item.used_sessions} de {item.total_sessions} sesiones disponibles</span></div>{item.status === 'active' && <Link className="login-button" to={`/entrenadores/${item.coach_id}?package=${item.id}&service=${item.service_id}`}>Reservar sesión <ArrowRight /></Link>}</article>)}</section>}</section>
+  return <section className="account-screen"><div className="account-head"><div><p className="eyebrow">Área personal</p><h1>Hola, {profile?.display_name || user.email?.split('@')[0]}.</h1></div>{profile?.role === 'coach' && <Link className="login-button" to="/profesional"><LayoutDashboard /> Panel profesional</Link>}</div><AccountNavigation active="profile" />{profile && <AccountIdentity profile={profile} userId={user.id} onSaved={setProfile} />}<section className="booking-list"><div className="section-title"><h2>Próximas sesiones</h2><span>{remote.length + local.length} en total</span></div>{!remote.length && !local.length && <Empty title="Todavía no has reservado." copy="Encuentra a tu entrenador y elige el primer hueco que te venga bien." action={<Link className="button button-primary button-md" to="/">Buscar entrenador</Link>} />}{local.map((item) => <article className="booking-row" key={item.id}><div className="date-block"><strong>{item.startsAt.split(' · ')[0]}</strong><span>{item.startsAt.split(' · ')[1]}</span></div><div><p className="eyebrow">{item.status === 'confirmed' ? 'Confirmada · Demo' : item.status}</p><h3>{item.coachName}</h3><span>{item.serviceName}</span></div><strong>{item.amount} €</strong></article>)}{remote.map((item) => <article className="booking-row" key={item.id}><div className="date-block"><strong>{new Date(item.starts_at).toLocaleDateString('es-ES', { day: '2-digit', month: 'short' })}</strong><span>{new Date(item.starts_at).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</span></div><div><p className="eyebrow">{item.status}</p><h3>{item.coach_profiles?.profiles?.display_name || 'Entrenador CoachConnect'}</h3><span>{item.coach_services?.name}</span></div><strong>{item.amount_cents / 100} €</strong>{item.video_url && <a className="login-button" href={item.video_url} target="_blank" rel="noreferrer"><Video /> Entrar</a>}{['pending_payment', 'confirmed'].includes(item.status) && <button className="text-button" onClick={() => cancelBooking(item.id)}>Cancelar</button>}{item.status === 'completed' && <button className="text-button" onClick={() => reviewBooking(item.id)}>Valorar</button>}</article>)}</section>{packages.length > 0 && <section className="package-list"><div className="section-title"><h2>Mis bonos</h2></div>{packages.map((item) => <article key={item.id}><div><p className="eyebrow">{item.status}</p><h3>{item.coach_services?.name}</h3><span>{item.total_sessions - item.used_sessions} de {item.total_sessions} sesiones disponibles</span></div>{item.status === 'active' && <Link className="login-button" to={`/entrenadores/${item.coach_id}?package=${item.id}&service=${item.service_id}`}>Reservar sesión <ArrowRight /></Link>}</article>)}</section>}</section>
 }
 
 function Messages({ onAuth }: { onAuth: () => void }) {
@@ -728,7 +893,7 @@ function Messages({ onAuth }: { onAuth: () => void }) {
     if (!activeOther?.id) return
     try { await api('/api/v1/blocks', { method: 'POST', body: JSON.stringify({ user_id: activeOther.id }) }); toast.success('Usuario bloqueado') } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo bloquear') }
   }
-  return <section className="messages-screen"><Link className="back-link messages-back" to="/cuenta"><ArrowLeft /> Volver a mi cuenta</Link><div className="messages-head"><p className="eyebrow">Mensajería privada</p><h1>Tus conversaciones.</h1></div>{loadError && <p className="inbox-error" role="alert">{loadError}</p>}<div className="inbox"><aside>{conversations.map((item) => { const other = item.consumer_id === user.id ? item.coach : item.consumer; return <button className={active === item.id ? 'active' : ''} key={item.id} onClick={() => chooseConversation(item.id)}><span className="avatar">{(other?.display_name || 'CC').slice(0, 2).toUpperCase()}</span><span><strong>{other?.display_name || 'CoachConnect'}</strong><small>Conversación segura</small></span></button> })}{!conversations.length && <p>Aún no tienes conversaciones.</p>}</aside><div className="conversation">{active && <div className="conversation-actions"><strong>{activeOther?.display_name || 'CoachConnect'}</strong><button className="text-button" onClick={reportConversation}>Denunciar</button><button className="text-button" onClick={blockActiveUser}>Bloquear</button></div>}<div className="chat-messages">{messages.map((item) => <div className={`message ${item.sender_id === user.id ? 'outgoing' : 'incoming'} ${item.delivery_status === 'sending' ? 'sending' : ''}`} key={item.id}>{item.body}{item.attachment_path && <button className="attachment-link" onClick={() => openAttachment(item.attachment_path || '')}><Paperclip /> Abrir archivo</button>}<small>{item.delivery_status === 'sending' ? 'Enviando…' : new Date(item.created_at).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</small></div>)}</div>{active && <form className="chat-composer" onSubmit={send}><label className="attachment-button" aria-label="Adjuntar archivo"><Paperclip /><input type="file" accept=".pdf,image/jpeg,image/png,image/webp" onChange={attach} /></label><input aria-label="Mensaje" value={body} onChange={(event) => setBody(event.target.value)} placeholder="Escribe un mensaje…" disabled={busy} /><button type="submit" aria-label="Enviar" disabled={busy || !body.trim()}>{busy ? <LoaderCircle className="spin" /> : <Send />}</button></form>}</div></div></section>
+  return <section className="messages-screen"><div className="messages-head"><p className="eyebrow">Mensajería privada</p><h1>Tus conversaciones.</h1></div><AccountNavigation active="messages" />{loadError && <p className="inbox-error" role="alert">{loadError}</p>}<div className="inbox"><aside>{conversations.map((item) => { const other = item.consumer_id === user.id ? item.coach : item.consumer; return <button className={active === item.id ? 'active' : ''} key={item.id} onClick={() => chooseConversation(item.id)}><span className="avatar">{(other?.display_name || 'CC').slice(0, 2).toUpperCase()}</span><span><strong>{other?.display_name || 'CoachConnect'}</strong><small>Conversación segura</small></span></button> })}{!conversations.length && <p>Aún no tienes conversaciones.</p>}</aside><div className="conversation">{active && <div className="conversation-actions"><strong>{activeOther?.display_name || 'CoachConnect'}</strong><button className="text-button" onClick={reportConversation}>Denunciar</button><button className="text-button" onClick={blockActiveUser}>Bloquear</button></div>}<div className="chat-messages">{messages.map((item) => <div className={`message ${item.sender_id === user.id ? 'outgoing' : 'incoming'} ${item.delivery_status === 'sending' ? 'sending' : ''}`} key={item.id}>{item.body}{item.attachment_path && <button className="attachment-link" onClick={() => openAttachment(item.attachment_path || '')}><Paperclip /> Abrir archivo</button>}<small>{item.delivery_status === 'sending' ? 'Enviando…' : new Date(item.created_at).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</small></div>)}</div>{active && <form className="chat-composer" onSubmit={send}><label className="attachment-button" aria-label="Adjuntar archivo"><Paperclip /><input type="file" accept=".pdf,image/jpeg,image/png,image/webp" onChange={attach} /></label><input aria-label="Mensaje" value={body} onChange={(event) => setBody(event.target.value)} placeholder="Escribe un mensaje…" disabled={busy} /><button type="submit" aria-label="Enviar" disabled={busy || !body.trim()}>{busy ? <LoaderCircle className="spin" /> : <Send />}</button></form>}</div></div></section>
 }
 
 function Notifications({ onAuth }: { onAuth: () => void }) {
@@ -752,9 +917,11 @@ function Notifications({ onAuth }: { onAuth: () => void }) {
   return <section className="account-screen"><div className="account-head"><div><p className="eyebrow">Actividad</p><h1>Notificaciones.</h1></div></div><div className="notification-list">{items.map((item) => <button key={item.id} className={item.read_at ? 'read' : 'unread'} onClick={() => open(item)}><Bell /><span><strong>{item.title}</strong><small>{item.body}</small></span><time>{new Date(item.created_at).toLocaleString('es-ES')}</time></button>)}{!items.length && <Empty title="Todo al día." copy="Aquí aparecerán mensajes, reservas y cambios importantes." />}</div></section>
 }
 
-function ProPortal({ onAuth }: { onAuth: () => void }) {
+export function ProPortal({ onAuth }: { onAuth: () => void }) {
   const { user, loading } = useAuth()
   const [profile, setProfile] = useState<Profile | null>(null)
+  const [overviewData, setOverviewData] = useState<ProfessionalOverviewData | null>(null)
+  const [loadedUserId, setLoadedUserId] = useState<string | null>(null)
   const [portalSearch, setPortalSearch] = useSearchParams()
   const tab = portalSearch.get('tab') || 'overview'
   const setTab = (nextTab: string) => {
@@ -762,28 +929,29 @@ function ProPortal({ onAuth }: { onAuth: () => void }) {
     next.set('tab', nextTab)
     setPortalSearch(next)
   }
-  useEffect(() => { if (user) api<Profile>('/api/v1/me').then(setProfile).catch(() => undefined) }, [user])
-  if (loading) return <LoadingPage />
-  if (!user) return <AuthRequired onAuth={onAuth} title="Tu trabajo. Sin perseguir al algoritmo." coach />
-  return <section className="pro-screen"><div className="pro-header"><div><p className="eyebrow">CoachConnect para profesionales</p><h1>Tu trabajo.<br /><em>Bien visible.</em></h1></div><div className="pro-header-actions">{profile?.role === 'coach' && <Link className="preview-link" to={`/entrenadores/${user.id}?preview=1`}><Eye /> Ver como cliente</Link>}<Link className="back-link" to="/"><ArrowLeft /> Volver a la web</Link></div></div><div className="pro-shell"><aside className="pro-sidebar"><div className="pro-user"><div className="avatar">{(profile?.display_name || user.email || 'CC').slice(0, 2).toUpperCase()}</div><div><strong>{profile?.display_name || user.email}</strong><span>{profile?.role === 'coach' ? 'Perfil profesional' : 'Completa tu alta'}</span></div></div>{[['overview', 'Resumen'], ['profile', 'Perfil'], ['services', 'Servicios'], ['availability', 'Agenda'], ['validation', 'Validación'], ['integrations', 'Pagos y vídeo']].map(([key, label]) => <button className={tab === key ? 'active' : ''} onClick={() => setTab(key)} key={key}>{label}</button>)}<div className="pro-sidebar-foot"><ShieldCheck /> Datos protegidos</div></aside><div className="pro-content">{tab === 'overview' && <ProOverview profile={profile} userId={user.id} onTab={setTab} />}{tab === 'profile' && <CoachOnboarding onSaved={() => api<Profile>('/api/v1/me').then(setProfile)} />}{tab === 'services' && <ServicesForm />}{tab === 'availability' && <AvailabilityForm />}{tab === 'validation' && <CredentialForm userId={user.id} />}{tab === 'integrations' && <Integrations />}</div></div></section>
-}
-
-function ProOverview({ profile, userId, onTab }: { profile: Profile | null; userId: string; onTab: (tab: string) => void }) {
-  const [coachProfile, setCoachProfile] = useState<(CoachProfileRecord & { availability_rules?: any[]; stripe_account_id?: string | null }) | null>(null)
-  const [services, setServices] = useState<CoachServiceRecord[]>([])
-  const [bookings, setBookings] = useState<BookingRecord[]>([])
-  const [loaded, setLoaded] = useState(false)
   useEffect(() => {
+    if (!user) return
+    let current = true
     Promise.all([
+      api<Profile>('/api/v1/me').catch(() => null),
       api<CoachProfileRecord & { availability_rules?: any[]; stripe_account_id?: string | null }>('/api/v1/coach/profile').catch(() => null),
       api<CoachServiceRecord[]>('/api/v1/coach/services').catch(() => []),
       api<BookingRecord[]>('/api/v1/bookings').catch(() => []),
-    ]).then(([nextProfile, nextServices, nextBookings]) => {
-      setCoachProfile(nextProfile)
-      setServices(nextServices)
-      setBookings(nextBookings)
-    }).finally(() => setLoaded(true))
-  }, [])
+    ]).then(([nextProfile, coachProfile, services, bookings]) => {
+      if (!current) return
+      setProfile(nextProfile)
+      setOverviewData({ coachProfile, services, bookings })
+      setLoadedUserId(user.id)
+    })
+    return () => { current = false }
+  }, [user])
+  if (loading || (user && loadedUserId !== user.id)) return <LoadingPage />
+  if (!user) return <AuthRequired onAuth={onAuth} title="Tu trabajo. Sin perseguir al algoritmo." coach />
+  return <section className="pro-screen"><div className="pro-header"><div className="pro-header-profile">{profile && <ProfileAvatar profile={profile} />}<div><p className="eyebrow">CoachConnect para profesionales</p><h1>Tu trabajo.<br /><em>Bien visible.</em></h1></div></div><div className="pro-header-actions">{profile?.role === 'coach' && <Link className="preview-link" to={`/entrenadores/${user.id}?preview=1`}><Eye /> Ver como cliente</Link>}<Link className="back-link" to="/"><ArrowLeft /> Volver a la web</Link></div></div><AccountNavigation active="professional" /><div className="pro-shell"><aside className="pro-sidebar"><div className="pro-user">{profile && <ProfileAvatar profile={profile} className="pro-user-avatar" />}<div><strong>{profile?.display_name || user.email}</strong><span>{profile?.role === 'coach' ? 'Perfil profesional' : 'Completa tu alta'}</span></div></div>{[['overview', 'Resumen'], ['profile', 'Perfil'], ['services', 'Servicios'], ['availability', 'Agenda'], ['validation', 'Validación'], ['integrations', 'Pagos y vídeo']].map(([key, label]) => <button className={tab === key ? 'active' : ''} onClick={() => setTab(key)} key={key}>{label}</button>)}<div className="pro-sidebar-foot"><ShieldCheck /> Datos protegidos</div></aside><div className="pro-content">{tab === 'overview' && overviewData && <ProOverview profile={profile} userId={user.id} onTab={setTab} data={overviewData} />}{tab === 'profile' && <CoachOnboarding accountProfile={profile} current={overviewData?.coachProfile || null} onSaved={(saved) => { setOverviewData((data) => data ? { ...data, coachProfile: { ...data.coachProfile, ...saved } as ProfessionalOverviewData['coachProfile'] } : data); void api<Profile>('/api/v1/me').then(setProfile) }} />}{tab === 'services' && <ServicesForm />}{tab === 'availability' && <AvailabilityForm />}{tab === 'validation' && <CredentialForm userId={user.id} />}{tab === 'integrations' && <Integrations />}</div></div></section>
+}
+
+function ProOverview({ profile, userId, onTab, data }: { profile: Profile | null; userId: string; onTab: (tab: string) => void; data: ProfessionalOverviewData }) {
+  const { coachProfile, services, bookings } = data
   const now = Date.now()
   const upcoming = bookings.filter((item) => new Date(item.starts_at).getTime() >= now && ['pending_payment', 'confirmed'].includes(item.status))
   const netRevenue = bookings.filter((item) => ['confirmed', 'completed'].includes(item.status)).reduce((sum, item) => sum + item.amount_cents * .85, 0) / 100
@@ -796,18 +964,13 @@ function ProOverview({ profile, userId, onTab }: { profile: Profile | null; user
   ]
   const progress = Math.round(checks.filter((item) => item.done).length / checks.length * 100)
   const publication = ({ draft: 'Borrador privado', credentials_submitted: 'Documentación recibida', under_review: 'En revisión', verified: 'Perfil publicado', rejected: 'Requiere cambios', suspended: 'Perfil suspendido' } as Record<string, string>)[coachProfile?.verification_status || 'draft']
-  if (!loaded) return <LoadingBlock label="Preparando tu resumen" />
   return <><div className="pro-content-head"><div><p className="eyebrow">Vista general</p><h2>{profile?.role === 'coach' ? 'Tu negocio, de un vistazo.' : 'Empieza por tu perfil.'}</h2></div><span className={`status-pill status-${coachProfile?.verification_status || 'draft'}`}><span className="live-dot" /> {publication}</span></div><div className="publication-note"><div><strong>{coachProfile?.verification_status === 'verified' ? 'Tu perfil ya aparece en las búsquedas.' : 'Tu perfil aún no aparece públicamente.'}</strong><span>{coachProfile?.verification_status === 'verified' ? 'Los clientes pueden verlo, escribirte y reservar.' : 'Puedes previsualizarlo ahora; se publicará al completar la validación.'}</span></div>{coachProfile && <Link to={`/entrenadores/${userId}?preview=1`}><Eye /> Previsualizar</Link>}</div><div className="metric-grid"><div><span>Estado del perfil</span><strong>{progress}%</strong><small>{checks.filter((item) => !item.done).length} pasos pendientes</small></div><div><span>Próximas sesiones</span><strong>{upcoming.length}</strong><small>{upcoming.length ? 'Reservadas en tu agenda' : 'Sin reservas próximas'}</small></div><div><span>Ingresos netos</span><strong>{netRevenue.toLocaleString('es-ES', { style: 'currency', currency: 'EUR' })}</strong><small>Después de comisión</small></div></div><div className="pro-panels"><div className="pro-panel schedule-panel"><div className="panel-heading"><div><p className="eyebrow">Lista de publicación</p><h3>Haz que tu perfil trabaje por ti</h3></div></div>{checks.map((item, index) => <button type="button" className={`schedule-row ${item.done ? 'done' : ''}`} key={item.label} onClick={() => onTab(item.tab)}><span className="schedule-day">0{index + 1}</span><div><strong>{item.label}</strong><small>{item.done ? 'Completado' : 'Abrir y completar'}</small></div>{item.done ? <Check /> : <ArrowRight />}</button>)}</div><div className="pro-panel profile-progress"><div className="progress-ring" style={{ '--progress': `${progress * 3.6}deg` } as CSSProperties}><strong>{progress}%</strong><span>perfil</span></div><div><p className="eyebrow">Tu escaparate</p><h3>{progress === 100 ? 'Listo para recibir clientes.' : 'Completa lo que falta.'}</h3><p>El progreso se calcula con tus datos reales, servicios, agenda, validación y pagos.</p></div></div></div></>
 }
 
-function CoachOnboarding({ onSaved }: { onSaved: () => void }) {
+function CoachOnboarding({ accountProfile, current, onSaved }: { accountProfile: Profile | null; current: ProfessionalOverviewData['coachProfile']; onSaved: (profile: CoachProfileRecord) => void }) {
   const [busy, setBusy] = useState(false)
-  const [current, setCurrent] = useState<any | null>(null)
-  const [loaded, setLoaded] = useState(false)
-  useEffect(() => { api('/api/v1/coach/profile').then(setCurrent).catch(() => undefined).finally(() => setLoaded(true)) }, [])
-  const submit = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); setBusy(true); const form = new FormData(event.currentTarget); const values = Object.fromEntries(form); const payload = { ...values, years_experience: Number(values.years_experience), languages: String(values.languages_text || 'es').split(',').map((item) => item.trim().toLowerCase()).filter(Boolean) }; delete (payload as Record<string, unknown>).languages_text; try { await api('/api/v1/coach/onboarding', { method: 'POST', body: JSON.stringify(payload) }); toast.success('Perfil profesional guardado'); onSaved() } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo guardar') } finally { setBusy(false) } }
-  if (!loaded) return <LoadingBlock label="Cargando tu perfil" />
-  return <ProForm title="Perfil profesional" intro="Lo esencial para que un consumidor entienda en segundos si encajas." onSubmit={submit}><label>Nombre visible<input name="display_name" required minLength={2} defaultValue={current?.profiles?.display_name || ''} /></label><label>Titular profesional<input name="headline" required minLength={5} placeholder="Fuerza y movilidad sin complicaciones" defaultValue={current?.headline || ''} /></label><label className="wide">Sobre tu método<textarea name="bio" required minLength={20} rows={5} defaultValue={current?.bio || ''} /></label><label>Ciudad<input name="city" required defaultValue={current?.city || ''} /></label><label>Modalidad<select name="mode" defaultValue={current?.mode || 'hibrido'}><option value="hibrido">Online y presencial</option><option value="online">Online</option><option value="presencial">Presencial</option></select></label><label>Años de experiencia<input name="years_experience" type="number" min="0" defaultValue={current?.years_experience || 0} /></label><label>Idiomas<input name="languages_text" defaultValue={(current?.languages || ['es']).join(', ')} placeholder="es, en" /></label><Button type="submit" disabled={busy}>{busy && <LoaderCircle className="spin" />} Guardar perfil</Button></ProForm>
+  const submit = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const form = new FormData(event.currentTarget); const values = Object.fromEntries(form); if (!String(values.city || '').trim()) return toast.error('Selecciona una ciudad de la lista de coincidencias.'); setBusy(true); const payload = { ...values, years_experience: Number(values.years_experience), languages: String(values.languages_text || 'es').split(',').map((item) => item.trim().toLowerCase()).filter(Boolean) }; delete (payload as Record<string, unknown>).languages_text; try { const saved = await api<CoachProfileRecord>('/api/v1/coach/onboarding', { method: 'POST', body: JSON.stringify(payload) }); toast.success('Perfil profesional guardado'); onSaved(saved) } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo guardar') } finally { setBusy(false) } }
+  return <ProForm title="Perfil profesional" intro="Lo esencial para que un consumidor entienda en segundos si encajas." onSubmit={submit}><div className="profile-form-identity wide">{accountProfile && <ProfileAvatar profile={accountProfile} />}<div><strong>{accountProfile?.display_name || 'Tu identidad'}</strong><span>{accountProfile?.email || 'Correo no disponible'}</span></div><Link className="login-button" to="/cuenta"><Camera /> Cambiar foto</Link></div><label>Nombre visible<input name="display_name" required minLength={2} defaultValue={current?.profiles?.display_name || accountProfile?.display_name || ''} /></label><ReadonlyAccountEmail email={accountProfile?.email} /><label>Titular profesional<input name="headline" required minLength={5} placeholder="Fuerza y movilidad sin complicaciones" defaultValue={current?.headline || ''} /></label><label>Modalidad<select name="mode" defaultValue={current?.mode || 'hibrido'}><option value="hibrido">Online y presencial</option><option value="online">Online</option><option value="presencial">Presencial</option></select></label><label className="wide">Sobre tu método<textarea name="bio" required minLength={20} rows={5} defaultValue={current?.bio || ''} /></label><CityAutocompleteField initialValue={current?.city || accountProfile?.city || ''} /><label>Años de experiencia<input name="years_experience" type="number" min="0" defaultValue={current?.years_experience || 0} /></label><label>Idiomas<input name="languages_text" defaultValue={(current?.languages || ['es']).join(', ')} placeholder="es, en" /></label><Button type="submit" disabled={busy}>{busy && <LoaderCircle className="spin" />} Guardar perfil</Button></ProForm>
 }
 
 function ServicesForm() {
@@ -858,7 +1021,8 @@ function AvailabilityForm() {
   const [endsAt, setEndsAt] = useState('19:00')
   const [exceptions, setExceptions] = useState<any[]>([])
   const [respondsNow, setRespondsNow] = useState(false)
-  const [weekStart, setWeekStart] = useState(() => startOfWeek(new Date()))
+  const [calendarView, setCalendarView] = useState<CalendarView>('week')
+  const [calendarDate, setCalendarDate] = useState(() => startOfDay(new Date()))
   const [calendarBookings, setCalendarBookings] = useState<BookingRecord[]>([])
   const [calendarExceptions, setCalendarExceptions] = useState<any[]>([])
   const [calendarLoading, setCalendarLoading] = useState(true)
@@ -875,20 +1039,44 @@ function AvailabilityForm() {
     api<any>('/api/v1/coach/profile').then((profile) => setRespondsNow(profile.responds_now)).catch(() => undefined)
   }, [])
   useEffect(() => {
-    const weekEnd = addDays(weekStart, 7)
+    const visibleDays = calendarDaysFor(calendarView, calendarDate)
+    const rangeStart = visibleDays[0]
+    const rangeEnd = addDays(visibleDays[visibleDays.length - 1], 1)
     setCalendarLoading(true)
-    api<{ bookings: BookingRecord[]; exceptions: any[] }>(`/api/v1/coach/calendar?from=${encodeURIComponent(weekStart.toISOString())}&to=${encodeURIComponent(weekEnd.toISOString())}`)
+    api<{ bookings: BookingRecord[]; exceptions: any[] }>(`/api/v1/coach/calendar?from=${encodeURIComponent(rangeStart.toISOString())}&to=${encodeURIComponent(rangeEnd.toISOString())}`)
       .then((data) => { setCalendarBookings(data.bookings); setCalendarExceptions(data.exceptions); setCalendarError('') })
       .catch((error) => setCalendarError(error instanceof Error ? error.message : 'No pudimos cargar el calendario'))
       .finally(() => setCalendarLoading(false))
-  }, [weekStart])
+  }, [calendarDate, calendarView])
   const save = async () => { const rules = active.map((weekday) => ({ weekday, starts_at: startsAt, ends_at: endsAt, timezone: 'Europe/Madrid' })); try { await api('/api/v1/coach/availability', { method: 'PUT', body: JSON.stringify(rules) }); toast.success('Disponibilidad actualizada') } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo guardar') } }
   const addException = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const formElement = event.currentTarget; const form = new FormData(formElement); try { const item = await api<any>('/api/v1/coach/availability/exceptions', { method: 'POST', body: JSON.stringify({ starts_at: new Date(String(form.get('starts_at'))).toISOString(), ends_at: new Date(String(form.get('ends_at'))).toISOString(), available: false, label: form.get('label') }) }); setExceptions((current) => [...current, item]); setCalendarExceptions((current) => [...current, item]); formElement.reset(); toast.success('Bloqueo añadido') } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo añadir') } }
   const removeException = async (id: string) => { try { await api(`/api/v1/coach/availability/exceptions/${id}`, { method: 'DELETE' }); setExceptions((current) => current.filter((item) => item.id !== id)); setCalendarExceptions((current) => current.filter((item) => item.id !== id)); toast.success('Bloqueo eliminado') } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo eliminar') } }
   const toggleRespondsNow = async () => { const enabled = !respondsNow; try { await api('/api/v1/coach/responds-now', { method: 'PATCH', body: JSON.stringify({ enabled }) }); setRespondsNow(enabled) } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo actualizar') } }
-  const weekDays = Array.from({ length: 7 }, (_, index) => addDays(weekStart, index))
+  const visibleDays = calendarDaysFor(calendarView, calendarDate)
+  const moveCalendar = (direction: number) => setCalendarDate((current) => calendarView === 'month' ? addMonths(current, direction) : addDays(current, direction * (calendarView === 'week' ? 7 : 1)))
+  const calendarTitle = calendarView === 'day'
+    ? calendarDate.toLocaleDateString('es-ES', { weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' })
+    : calendarView === 'month'
+      ? calendarDate.toLocaleDateString('es-ES', { month: 'long', year: 'numeric' })
+      : `${visibleDays[0].toLocaleDateString('es-ES', { day: '2-digit', month: 'long' })} — ${visibleDays[6].toLocaleDateString('es-ES', { day: '2-digit', month: 'long' })}`
   const statusLabel: Record<string, string> = { pending_payment: 'Pago pendiente', confirmed: 'Confirmada', completed: 'Completada', cancelled: 'Cancelada', no_show: 'No asistió' }
-  return <section className="agenda-manager"><div className="section-title"><div><p className="eyebrow">Agenda profesional</p><h2 className="form-title">Tus sesiones, claras.</h2></div><button className={`status-toggle ${respondsNow ? 'active' : ''}`} onClick={toggleRespondsNow}><span className="live-dot" /> {respondsNow ? 'Respondo ahora' : 'Activar Responde ahora'}</button></div><p className="form-intro">Consulta qué sesiones están reservadas y administra debajo tu disponibilidad recurrente.</p><section className="week-calendar" aria-label="Calendario semanal de sesiones"><header><div><p className="eyebrow">Semana</p><h3>{weekStart.toLocaleDateString('es-ES', { day: '2-digit', month: 'long' })} — {addDays(weekStart, 6).toLocaleDateString('es-ES', { day: '2-digit', month: 'long' })}</h3></div><div className="calendar-controls"><button aria-label="Semana anterior" onClick={() => setWeekStart((current) => addDays(current, -7))}><ChevronLeft /></button><button onClick={() => setWeekStart(startOfWeek(new Date()))}>Hoy</button><button aria-label="Semana siguiente" onClick={() => setWeekStart((current) => addDays(current, 7))}><ChevronRight /></button></div></header>{calendarError && <p className="form-error" role="alert">{calendarError}</p>}{calendarLoading ? <LoadingBlock label="Cargando la semana" /> : <div className="week-grid">{weekDays.map((date, index) => { const dayBookings = calendarBookings.filter((item) => new Date(item.starts_at).toDateString() === date.toDateString()); const dayBlocks = calendarExceptions.filter((item) => new Date(item.starts_at).toDateString() === date.toDateString()); const today = date.toDateString() === new Date().toDateString(); return <article className={today ? 'today' : ''} key={date.toISOString()}><div className="week-day-head"><span>{days[index].slice(0, 3)}</span><strong>{date.getDate()}</strong></div><div className="week-events">{dayBookings.map((item) => <div className={`calendar-event status-${item.status.replaceAll('_', '-')}`} key={item.id}><time>{new Date(item.starts_at).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</time><strong>{item.coach_services?.name || 'Sesión'}</strong><span>{item.profiles?.display_name || 'Cliente'}</span><small>{statusLabel[item.status] || item.status}</small></div>)}{dayBlocks.map((item) => <div className="calendar-event blocked" key={item.id}><time>{new Date(item.starts_at).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</time><strong>{item.label || 'Bloqueo'}</strong><small>No disponible</small></div>)}{!dayBookings.length && !dayBlocks.length && <span className="calendar-empty">Sin sesiones</span>}</div></article> })}</div>}</section><section className="availability-settings"><div><p className="eyebrow">Horario recurrente</p><h3>Cuándo pueden reservarte</h3><p>Activa tus días habituales y define una franja. Los bloqueos siempre tienen prioridad.</p></div><div className="time-range"><label>Desde<input type="time" value={startsAt} onChange={(event) => setStartsAt(event.target.value)} /></label><label>Hasta<input type="time" value={endsAt} onChange={(event) => setEndsAt(event.target.value)} /></label></div><div className="day-grid">{days.map((day, index) => <button type="button" className={active.includes(index) ? 'active' : ''} onClick={() => setActive((items) => items.includes(index) ? items.filter((item) => item !== index) : [...items, index])} key={day}><span>{day.slice(0, 3)}</span><strong>{startsAt}—{endsAt}</strong><Check /></button>)}</div><Button onClick={save}>Guardar disponibilidad</Button></section><form className="exception-form" onSubmit={addException}><h3>Vacaciones y bloqueos</h3><label>Desde<input name="starts_at" type="datetime-local" required /></label><label>Hasta<input name="ends_at" type="datetime-local" required /></label><label>Motivo<input name="label" placeholder="Vacaciones" /></label><Button type="submit">Añadir bloqueo</Button></form><div className="compact-list exception-list">{exceptions.map((item) => <div key={item.id}><div><strong>{item.label || 'Bloqueo'}</strong><span>{new Date(item.starts_at).toLocaleString('es-ES')} — {new Date(item.ends_at).toLocaleString('es-ES')}</span></div><button className="danger-action" onClick={() => removeException(item.id)}>Eliminar</button></div>)}</div></section>
+  return <section className="agenda-manager">
+    <div className="section-title"><div><p className="eyebrow">Agenda profesional</p><h2 className="form-title">Tus sesiones, claras.</h2></div><button className={`status-toggle ${respondsNow ? 'active' : ''}`} onClick={toggleRespondsNow}><span className="live-dot" /> {respondsNow ? 'Respondo ahora' : 'Activar Responde ahora'}</button></div>
+    <p className="form-intro">Consulta qué sesiones están reservadas y administra debajo tu disponibilidad recurrente.</p>
+    <section className={`week-calendar calendar-${calendarView}`} aria-label={`Calendario ${calendarView === 'day' ? 'diario' : calendarView === 'week' ? 'semanal' : 'mensual'} de sesiones`}>
+      <header><div><p className="eyebrow">{calendarView === 'day' ? 'Día' : calendarView === 'week' ? 'Semana' : 'Mes'}</p><h3>{calendarTitle}</h3></div><div className="calendar-toolbar"><div className="calendar-view-tabs" role="group" aria-label="Visualización del calendario">{([['day', 'Día'], ['week', 'Semana'], ['month', 'Mes']] as const).map(([view, label]) => <button type="button" className={calendarView === view ? 'active' : ''} aria-pressed={calendarView === view} onClick={() => setCalendarView(view)} key={view}>{label}</button>)}</div><div className="calendar-controls"><button aria-label="Periodo anterior" onClick={() => moveCalendar(-1)}><ChevronLeft /></button><button onClick={() => setCalendarDate(startOfDay(new Date()))}>Hoy</button><button aria-label="Periodo siguiente" onClick={() => moveCalendar(1)}><ChevronRight /></button></div></div></header>
+      {calendarError && <p className="form-error" role="alert">{calendarError}</p>}
+      {calendarLoading ? <LoadingBlock label="Cargando el calendario" /> : <div className="week-grid">{visibleDays.map((date) => {
+        const dayBookings = calendarBookings.filter((item) => new Date(item.starts_at).toDateString() === date.toDateString())
+        const dayBlocks = calendarExceptions.filter((item) => new Date(item.starts_at).toDateString() === date.toDateString())
+        const today = date.toDateString() === new Date().toDateString()
+        const outsideMonth = calendarView === 'month' && date.getMonth() !== calendarDate.getMonth()
+        return <article className={`${today ? 'today' : ''} ${outsideMonth ? 'outside-month' : ''}`} key={date.toISOString()}><div className="week-day-head"><span>{date.toLocaleDateString('es-ES', { weekday: 'short' }).replace('.', '')}</span><strong>{date.getDate()}</strong></div><div className="week-events">{dayBookings.map((item) => <div className={`calendar-event status-${item.status.replaceAll('_', '-')}`} key={item.id}><time>{new Date(item.starts_at).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</time><strong>{item.coach_services?.name || 'Sesión'}</strong><span>{item.profiles?.display_name || 'Cliente'}</span><small>{statusLabel[item.status] || item.status}</small></div>)}{dayBlocks.map((item) => <div className="calendar-event blocked" key={item.id}><time>{new Date(item.starts_at).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</time><strong>{item.label || 'Bloqueo'}</strong><small>No disponible</small></div>)}{!dayBookings.length && !dayBlocks.length && <span className="calendar-empty">Sin sesiones</span>}</div></article>
+      })}</div>}
+    </section>
+    <section className="availability-settings"><div><p className="eyebrow">Horario recurrente</p><h3>Cuándo pueden reservarte</h3><p>Activa tus días habituales y define una franja. Los bloqueos siempre tienen prioridad.</p></div><div className="time-range"><label>Desde<input type="time" value={startsAt} onChange={(event) => setStartsAt(event.target.value)} /></label><label>Hasta<input type="time" value={endsAt} onChange={(event) => setEndsAt(event.target.value)} /></label></div><div className="day-grid">{days.map((day, index) => <button type="button" className={active.includes(index) ? 'active' : ''} onClick={() => setActive((items) => items.includes(index) ? items.filter((item) => item !== index) : [...items, index])} key={day}><span>{day.slice(0, 3)}</span><strong>{startsAt}—{endsAt}</strong><Check /></button>)}</div><Button onClick={save}>Guardar disponibilidad</Button></section>
+    <form className="exception-form" onSubmit={addException}><h3>Vacaciones y bloqueos</h3><label>Desde<input name="starts_at" type="datetime-local" required /></label><label>Hasta<input name="ends_at" type="datetime-local" required /></label><label>Motivo<input name="label" placeholder="Vacaciones" /></label><Button type="submit">Añadir bloqueo</Button></form><div className="compact-list exception-list">{exceptions.map((item) => <div key={item.id}><div><strong>{item.label || 'Bloqueo'}</strong><span>{new Date(item.starts_at).toLocaleString('es-ES')} — {new Date(item.ends_at).toLocaleString('es-ES')}</span></div><button className="danger-action" onClick={() => removeException(item.id)}>Eliminar</button></div>)}</div>
+  </section>
 }
 
 function CredentialForm({ userId }: { userId: string }) {

@@ -232,6 +232,10 @@ a { color: inherit; text-decoration: none; }
 .account-tabs { display: flex; gap: 25px; border-bottom: 1px solid var(--line); margin: 55px 0 35px; }
 .account-tabs a { font-size: 11px; color: var(--muted); padding-bottom: 13px; border-bottom: 2px solid transparent; }
 .account-tabs a.active { color: var(--ink); border-color: var(--ink); font-weight: 800; }
+.messages-screen .messages-head { margin-bottom: 0; }
+.messages-screen .account-tabs { margin-top: 32px; }
+.pro-screen > .account-tabs { max-width: 1150px; margin: 0 auto 35px; }
+.pro-screen > .pro-header { margin-bottom: 28px; }
 .booking-list { display: grid; gap: 8px; }
 .booking-list .section-title { margin-bottom: 10px; }
 .booking-list h2 { font: 700 26px var(--display); letter-spacing: -.08em; }
@@ -371,6 +375,8 @@ a { color: inherit; text-decoration: none; }
 /* Professional workspace */
 .pro-header-actions { display: flex; align-items: center; gap: 12px; }
 .pro-header-actions .back-link { position: static; }
+.pro-header-profile { display: flex; align-items: center; gap: 20px; }
+.pro-header-profile .account-avatar { width: 76px; height: 76px; font-size: 19px; box-shadow: 0 14px 30px #11120f14; }
 .preview-link, .publication-note a { display: inline-flex; align-items: center; justify-content: center; gap: 8px; border: 1px solid var(--ink); background: var(--ink); color: var(--surface); min-height: 42px; padding: 0 15px; font-size: 11px; font-weight: 800; }
 .preview-link svg, .publication-note a svg { width: 16px; height: 16px; }
 .publication-note { display: flex; align-items: center; justify-content: space-between; gap: 18px; background: #eefbc8; border: 1px solid #d6e6a9; padding: 16px 18px; margin: -16px 0 24px; }
@@ -397,6 +403,37 @@ a { color: inherit; text-decoration: none; }
 .profile-empty strong { color: var(--ink); font-size: 12px; }
 .profile-empty span { font-size: 10px; }
 .chat-cta:disabled { opacity: .45; cursor: not-allowed; }
+.presentation-video h2 { font: 700 24px var(--display); letter-spacing: -.06em; }
+.presentation-video video { display: block; width: 100%; max-height: 460px; margin-top: 16px; background: #11120f; object-fit: contain; }
+.account-identity { margin-bottom: 38px; border: 1px solid var(--line); background: var(--surface); }
+.account-identity-summary { display: grid; grid-template-columns: auto 1fr auto; gap: 18px; align-items: center; padding: 20px; }
+.account-identity-summary h2 { margin-bottom: 7px; font: 700 23px var(--display); letter-spacing: -.06em; }
+.account-identity-summary > div { display: grid; gap: 5px; }
+.account-identity-summary > div > span { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10px; }
+.account-identity-summary svg { width: 13px; height: 13px; }
+.account-avatar { width: 64px; height: 64px; flex: 0 0 auto; overflow: hidden; border-radius: 50%; background: var(--acid); display: grid; place-items: center; font: 700 16px var(--display); }
+.account-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.account-identity-form { padding: 22px; border-top: 1px solid var(--line); }
+.avatar-editor { grid-row: span 2; display: grid; justify-items: start; align-content: start; gap: 9px; }
+.avatar-editor .account-avatar { width: 88px; height: 88px; }
+.avatar-editor label { position: relative; display: inline-flex; cursor: pointer; }
+.avatar-editor input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.avatar-editor small { color: var(--muted); font-size: 9px; }
+.profile-readonly-field { color: var(--muted); font-size: 10px; display: grid; gap: 7px; user-select: none; }
+.profile-readonly-field strong { min-height: 48px; padding: 0 13px; border: 1px solid #e1e2da; background: #f2f2ec; color: #686a62; display: flex; align-items: center; font-size: 11px; font-weight: 500; cursor: default; }
+.profile-readonly-field small { color: #8a8b83; font-size: 9px; }
+.profile-form-identity { display: flex; align-items: center; gap: 13px; padding: 14px; background: #f4f4ed; }
+.profile-form-identity > div { display: grid; gap: 4px; flex: 1; }
+.profile-form-identity strong { color: var(--ink); font-size: 12px; }
+.profile-form-identity span { font-size: 10px; }
+.profile-form-identity .account-avatar { width: 52px; height: 52px; }
+.pro-location-field { position: relative; color: var(--muted); font-size: 10px; display: grid; gap: 7px; }
+.pro-location-field .location-input-shell { min-height: 48px; padding: 0 12px; }
+.pro-location-field .location-input-shell input { height: 44px; padding: 0; font: inherit; color: var(--ink); }
+.pro-location-field .location-input-shell > svg { width: 17px; height: 17px; }
+.pro-location-field .location-status { min-height: 0; padding: 0; }
+.location-field-state { width: 20px; display: grid; place-items: center; color: #6f900c; }
+.location-field-state svg { width: 17px; height: 17px; }
 
 .services-heading { align-items: flex-start; margin-bottom: 25px; }
 .services-heading .form-intro { margin-bottom: 0; }
@@ -429,6 +466,11 @@ a { color: inherit; text-decoration: none; }
 .calendar-controls button { min-width: 36px; height: 36px; border: 1px solid var(--line); background: var(--surface); display: grid; place-items: center; padding: 0 10px; font-size: 10px; }
 .calendar-controls button + button { border-left: 0; }
 .calendar-controls svg { width: 15px; }
+.calendar-toolbar { display: flex; align-items: center; gap: 10px; }
+.calendar-view-tabs { display: flex; }
+.calendar-view-tabs button { height: 36px; padding: 0 11px; border: 1px solid var(--line); border-right: 0; background: var(--surface); color: var(--muted); font-size: 10px; }
+.calendar-view-tabs button:last-child { border-right: 1px solid var(--line); }
+.calendar-view-tabs button.active { background: var(--ink); color: var(--acid); border-color: var(--ink); font-weight: 800; }
 .week-grid { display: grid; grid-template-columns: repeat(7, minmax(100px, 1fr)); min-width: 700px; }
 .week-grid > article { min-height: 245px; border-right: 1px solid var(--line); }
 .week-grid > article:last-child { border-right: 0; }
@@ -446,6 +488,15 @@ a { color: inherit; text-decoration: none; }
 .calendar-event strong { font-size: 10px; line-height: 1.25; }
 .calendar-event span { color: var(--muted); font-size: 9px; }
 .calendar-empty { color: #a0a199; font-size: 9px; padding: 7px 2px; }
+.calendar-day .week-grid { grid-template-columns: minmax(0, 1fr); min-width: 0; }
+.calendar-day .week-grid > article { min-height: 300px; border-right: 0; }
+.calendar-day .week-events { grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); }
+.calendar-month .week-grid > article { min-height: 130px; }
+.calendar-month .week-day-head { min-height: 42px; }
+.calendar-month .week-events { gap: 3px; padding: 5px; }
+.calendar-month .calendar-event { padding: 5px; }
+.calendar-month .calendar-event span, .calendar-month .calendar-event small { display: none; }
+.calendar-month .outside-month { opacity: .42; background: #eeeeea; }
 .availability-settings { border-top: 1px solid var(--line); padding-top: 28px; }
 .availability-settings > div:first-child > p:last-child { color: var(--muted); font-size: 11px; margin-top: 5px; }
 .exception-list > div > div { display: grid; gap: 4px; }
@@ -660,4 +711,15 @@ a { color: inherit; text-decoration: none; }
   .confirm-dialog { padding: 27px 22px; }
   .confirm-actions { flex-direction: column-reverse; }
   .confirm-actions > button { min-height: 42px; }
+  .account-identity-summary { grid-template-columns: auto 1fr; }
+  .account-identity-summary > button { grid-column: 1 / -1; justify-self: stretch; }
+  .account-avatar { width: 54px; height: 54px; }
+  .profile-form-identity { align-items: flex-start; flex-wrap: wrap; }
+  .profile-form-identity .login-button { width: 100%; }
+  .calendar-toolbar { width: 100%; align-items: stretch; flex-direction: column; }
+  .calendar-view-tabs button { flex: 1; }
+  .calendar-controls { justify-content: stretch; }
+  .calendar-controls button { flex: 1; }
+  .week-calendar > header { min-width: 0; align-items: flex-start; flex-direction: column; }
+  .calendar-week > header, .calendar-week .week-grid, .calendar-month > header, .calendar-month .week-grid { min-width: 700px; }
 }

@@ -37,6 +37,7 @@ from .schemas import (
     PackageCheckoutRequest,
     PackageCheckoutResponse,
     PackageBookingRequest,
+    ProfileUpdateRequest,
     ReportCreateRequest,
     RespondsNowRequest,
     ReviewCreateRequest,
@@ -47,11 +48,7 @@ from .schemas import (
     UserAccessRequest,
 )
 from .seed import CATEGORIES, COACHES
-<<<<<<< HEAD
-from .services import auth_admin_list_users, auth_admin_set_user_access, create_checkout, create_package_checkout, db, exchange_oauth_code, notify_user, oauth_url, provision_meeting, storage_signed_url
-=======
-from .services import create_checkout, create_package_checkout, db, exchange_oauth_code, notify_user, oauth_url, provision_meeting, storage_signed_url, stripe_account_status
->>>>>>> agent/cambio2
+from .services import auth_admin_list_users, auth_admin_set_user_access, create_checkout, create_package_checkout, db, exchange_oauth_code, notify_user, oauth_url, provision_meeting, storage_signed_url, stripe_account_status
 
 
 logger = logging.getLogger(__name__)
@@ -277,13 +274,21 @@ async def coach_detail(coach_id: str) -> dict[str, Any]:
     if db.ready:
         rows = await db.select(
             "coach_profiles",
-            select=PUBLIC_COACH_SELECT,
+            select=f"{PUBLIC_COACH_SELECT},video_path,video_status",
             user_id=f"eq.{coach_id}",
             verification_status="eq.verified",
         )
         if rows:
-            rows[0]["coach_services"] = [service for service in rows[0].get("coach_services", []) if service.get("active")]
-            return rows[0]
+            row = rows[0]
+            video_path = row.pop("video_path", None)
+            video_status = row.pop("video_status", None)
+            row["coach_services"] = [service for service in row.get("coach_services", []) if service.get("active")]
+            row["presentation_video_url"] = (
+                await storage_signed_url("coach-videos", video_path, expires_in=3600)
+                if video_path and video_status == "approved"
+                else None
+            )
+            return row
     demo = next((coach for coach in COACHES if coach.id == coach_id), None)
     if not demo:
         raise HTTPException(404, "Entrenador no encontrado")
@@ -358,12 +363,46 @@ async def coach_slots(coach_id: str, service_id: str, days: int = Query(default=
 @app.get("/api/v1/me", tags=["account"])
 async def me(user: AuthUser = Depends(current_user)) -> dict[str, Any]:
     rows = await db.select("profiles", id=f"eq.{user.id}")
-    return rows[0] if rows else {"id": user.id, "display_name": user.email or "Usuario", "role": "consumer"}
+    profile = rows[0] if rows else {
+        "id": user.id,
+        "display_name": (user.email or "Usuario").split("@")[0],
+        "role": "consumer",
+    }
+    return {**profile, "email": user.email}
+
+
+@app.patch("/api/v1/me", tags=["account"])
+async def update_me(payload: ProfileUpdateRequest, user: AuthUser = Depends(current_user)) -> dict[str, Any]:
+    if payload.avatar_url:
+        expected_prefix = f"{settings.supabase_url.rstrip('/')}/storage/v1/object/public/avatars/{user.id}/"
+        if db.ready and not payload.avatar_url.startswith(expected_prefix):
+            raise HTTPException(422, "La foto de perfil debe pertenecer al usuario")
+    updated_at = datetime.now(timezone.utc).isoformat()
+    profile_payload = {
+        "display_name": payload.display_name.strip(),
+        "city": payload.city.strip() if payload.city else None,
+        "avatar_url": payload.avatar_url,
+        "updated_at": updated_at,
+    }
+    rows = await db.update("profiles", profile_payload, id=f"eq.{user.id}")
+    if not rows:
+        raise HTTPException(404, "Perfil no encontrado")
+    if rows[0].get("role") == "coach":
+        await db.update(
+            "coach_profiles",
+            {"city": profile_payload["city"], "updated_at": updated_at},
+            user_id=f"eq.{user.id}",
+        )
+    return {**rows[0], "email": user.email}
 
 
 @app.post("/api/v1/coach/onboarding", tags=["coach"])
 async def coach_onboarding(payload: CoachOnboardingRequest, user: AuthUser = Depends(current_user)) -> dict[str, Any]:
-    await db.update("profiles", {"display_name": payload.display_name, "role": "coach", "updated_at": datetime.now(timezone.utc).isoformat()}, id=f"eq.{user.id}")
+    await db.update(
+        "profiles",
+        {"display_name": payload.display_name, "city": payload.city, "role": "coach", "updated_at": datetime.now(timezone.utc).isoformat()},
+        id=f"eq.{user.id}",
+    )
     return await db.upsert(
         "coach_profiles",
         {
@@ -388,7 +427,13 @@ async def my_coach_profile(user: AuthUser = Depends(current_user)) -> dict[str, 
     )
     if not rows:
         raise HTTPException(404, "Perfil profesional no encontrado")
-    return rows[0]
+    row = rows[0]
+    row["presentation_video_url"] = (
+        await storage_signed_url("coach-videos", row["video_path"], expires_in=3600)
+        if row.get("video_path")
+        else None
+    )
+    return row
 
 
 @app.post("/api/v1/coach/services", tags=["coach"])
