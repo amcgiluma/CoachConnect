@@ -54,6 +54,12 @@ class AuthUser(BaseModel):
     email: str | None = None
 
 
+class ProfileUpdateRequest(BaseModel):
+    display_name: str = Field(min_length=2, max_length=80)
+    city: str | None = Field(default=None, min_length=2, max_length=80)
+    avatar_url: str | None = Field(default=None, max_length=2048)
+
+
 class CoachOnboardingRequest(BaseModel):
     display_name: str = Field(min_length=2, max_length=80)
     headline: str = Field(min_length=5, max_length=120)

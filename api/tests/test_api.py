@@ -140,9 +140,63 @@ def test_public_coach_detail_uses_safe_projection(monkeypatch) -> None:
     row = asyncio.run(main_module.coach_detail("coach-1"))
 
     assert row["user_id"] == "coach-1"
+    assert "video_path" not in row
+    assert "video_status" not in row
     coach_query = next(item for item in database.selects if item[0] == "coach_profiles")
-    assert coach_query[1] == main_module.PUBLIC_COACH_SELECT
+    assert coach_query[1] == f"{main_module.PUBLIC_COACH_SELECT},video_path,video_status"
     assert coach_query[2]["verification_status"] == "eq.verified"
+
+
+def test_public_coach_detail_exposes_only_an_approved_signed_video(monkeypatch) -> None:
+    database = PublicCoachDatabase()
+    original_select = database.select
+
+    async def select(table: str, select: str = "*", **filters):
+        rows = await original_select(table, select, **filters)
+        if table == "coach_profiles" and rows:
+            rows[0]["video_path"] = "coach-1/presentation.mp4"
+            rows[0]["video_status"] = "approved"
+        return rows
+
+    async def signed_url(bucket: str, path: str, expires_in: int = 300):
+        assert (bucket, path, expires_in) == ("coach-videos", "coach-1/presentation.mp4", 3600)
+        return "https://storage.example/signed-video"
+
+    database.select = select
+    monkeypatch.setattr(main_module, "db", database)
+    monkeypatch.setattr(main_module, "storage_signed_url", signed_url)
+
+    row = asyncio.run(main_module.coach_detail("coach-1"))
+
+    assert row["presentation_video_url"] == "https://storage.example/signed-video"
+    assert "video_path" not in row
+    assert "video_status" not in row
+
+
+def test_account_profile_returns_email_and_keeps_coach_city_in_sync(monkeypatch) -> None:
+    class ProfileDatabase:
+        ready = False
+
+        def __init__(self) -> None:
+            self.updates: list[tuple[str, dict, dict]] = []
+
+        async def update(self, table: str, payload: dict, **filters):
+            self.updates.append((table, payload, filters))
+            if table == "profiles":
+                return [{"id": "coach-1", "role": "coach", **payload}]
+            return [payload]
+
+    database = ProfileDatabase()
+    monkeypatch.setattr(main_module, "db", database)
+    payload = main_module.ProfileUpdateRequest(display_name="Marta", city="Sevilla")
+
+    row = asyncio.run(main_module.update_me(payload, AuthUser(id="coach-1", email="marta@example.com")))
+
+    assert row["email"] == "marta@example.com"
+    assert row["city"] == "Sevilla"
+    assert database.updates[0][0] == "profiles"
+    assert database.updates[1][0] == "coach_profiles"
+    assert database.updates[1][1]["city"] == "Sevilla"
 
 
 def test_coach_calendar_is_scoped_to_owner_and_range(monkeypatch) -> None:

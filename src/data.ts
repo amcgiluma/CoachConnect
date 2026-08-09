@@ -8,6 +8,7 @@ export type Coach = {
   onlineNow: boolean; bio: string; tags: string[]; services: CoachService[]; matchReasons?: string[]
   avatarUrl?: string; avatarAvifUrl?: string
   videoProvider?: 'meet' | 'zoom' | 'custom'
+  presentationVideoUrl?: string
 }
 
 export const categories: Category[] = [

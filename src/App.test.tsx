@@ -1,6 +1,7 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import App from './App'
+import { MemoryRouter } from 'react-router-dom'
+import App, { AccountIdentity, AccountNavigation, type Profile } from './App'
 
 afterEach(() => {
   cleanup()
@@ -9,6 +10,34 @@ afterEach(() => {
 })
 
 describe('CoachConnect', () => {
+  it('provides real navigation between profile, messages and professional profile', () => {
+    render(<MemoryRouter><AccountNavigation active="messages" /></MemoryRouter>)
+
+    expect(screen.getByRole('link', { name: /mi perfil/i })).toHaveAttribute('href', '/cuenta')
+    expect(screen.getByRole('link', { name: /^mensajes$/i })).toHaveAttribute('href', '/mensajes')
+    expect(screen.getByRole('link', { name: /perfil profesional/i })).toHaveAttribute('href', '/profesional')
+    expect(screen.getByRole('link', { name: /^mensajes$/i })).toHaveAttribute('aria-current', 'page')
+  })
+
+  it('focuses profile editing at the end of the name and truly discards changes', async () => {
+    const profile: Profile = { id: 'profile-1', display_name: 'María López', role: 'consumer', email: 'maria@example.com', city: 'Granada' }
+    render(<AccountIdentity profile={profile} userId="user-1" onSaved={vi.fn()} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /editar datos/i }))
+    const name = screen.getByLabelText(/nombre visible/i) as HTMLInputElement
+    await waitFor(() => expect(name).toHaveFocus())
+    expect(name.selectionStart).toBe(profile.display_name.length)
+    expect(screen.queryByRole('textbox', { name: /correo de la cuenta/i })).not.toBeInTheDocument()
+    expect(screen.getAllByText(profile.email!)).toHaveLength(2)
+
+    fireEvent.change(name, { target: { value: 'Nombre provisional' } })
+    fireEvent.click(screen.getAllByRole('button', { name: /descartar cambios/i })[1])
+    expect(screen.queryByLabelText(/nombre visible/i)).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /editar datos/i }))
+    expect(screen.getByLabelText(/nombre visible/i)).toHaveValue(profile.display_name)
+  })
+
   it('starts the matching questionnaire from a category', () => {
     render(<App />)
     expect(screen.getByRole('heading', { name: /encuentra tu próximo entrenador/i })).toBeInTheDocument()
@@ -140,5 +169,15 @@ describe('CoachConnect', () => {
     expect(screen.getByRole('dialog', { name: /vuelve a entrenar/i })).toBeInTheDocument()
     expect(screen.getByLabelText(/email/i)).toBeInTheDocument()
     expect(screen.getByLabelText(/contraseña/i)).toBeInTheDocument()
+  })
+
+  it('does not invent availability or a Friday booking for demo coaches', () => {
+    window.history.replaceState({}, '', '/entrenadores/marcos-sanz')
+    render(<App />)
+
+    expect(screen.getByRole('heading', { name: 'Marcos Sanz' })).toBeInTheDocument()
+    expect(screen.getByText(/no hay huecos publicados para los próximos días/i)).toBeInTheDocument()
+    expect(screen.queryByText(/viernes.*19:00/i)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /reservar y pagar/i })).toBeDisabled()
   })
 })
