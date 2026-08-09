@@ -47,7 +47,11 @@ from .schemas import (
     UserAccessRequest,
 )
 from .seed import CATEGORIES, COACHES
+<<<<<<< HEAD
 from .services import auth_admin_list_users, auth_admin_set_user_access, create_checkout, create_package_checkout, db, exchange_oauth_code, notify_user, oauth_url, provision_meeting, storage_signed_url
+=======
+from .services import create_checkout, create_package_checkout, db, exchange_oauth_code, notify_user, oauth_url, provision_meeting, storage_signed_url, stripe_account_status
+>>>>>>> agent/cambio2
 
 
 logger = logging.getLogger(__name__)
@@ -830,8 +834,11 @@ async def integration_url(provider: str, user: AuthUser = Depends(current_user))
 async def coach_integrations(user: AuthUser = Depends(current_user)) -> dict[str, Any]:
     coaches = await db.select("coach_profiles", user_id=f"eq.{user.id}")
     connections = await db.select("integration_connections", user_id=f"eq.{user.id}")
+    stripe_state = stripe_account_status(coaches[0].get("stripe_account_id") if coaches else None)
     return {
-        "stripe": bool(coaches and coaches[0].get("stripe_account_id")),
+        "stripe": stripe_state["ready"],
+        "stripe_status": stripe_state["status"],
+        "stripe_requirements_due": stripe_state["requirements_due"],
         "providers": [connection["provider"] for connection in connections],
         "custom_video_url": coaches[0].get("custom_video_url") if coaches else None,
     }
@@ -868,6 +875,12 @@ async def stripe_connect(user: AuthUser = Depends(current_user)) -> dict[str, st
         account = stripe.Account.create(type="express", country="ES", email=user.email, capabilities={"card_payments": {"requested": True}, "transfers": {"requested": True}})
         account_id = account.id
         await db.update("coach_profiles", {"stripe_account_id": account_id}, user_id=f"eq.{user.id}")
+    stripe_state = stripe_account_status(account_id)
+    if stripe_state["status"] == "unavailable":
+        raise HTTPException(502, "No se pudo consultar la cuenta de Stripe Connect")
+    if stripe_state["ready"]:
+        link = stripe.Account.create_login_link(account_id)
+        return {"url": link.url}
     link = stripe.AccountLink.create(account=account_id, refresh_url=f"{settings.frontend_url}/profesional?stripe=refresh", return_url=f"{settings.frontend_url}/profesional?stripe=complete", type="account_onboarding")
     return {"url": link.url}
 

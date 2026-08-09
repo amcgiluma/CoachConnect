@@ -18,6 +18,14 @@ La implementación cubre:
 
 Email funciona con la configuración actual. Google, Apple, Stripe, Resend, Meet y Zoom necesitan sus credenciales de proveedor para poder probarse extremo a extremo.
 
+### Comprobar Stripe, Meet y Zoom en local
+
+- Stripe está en modo de prueba cuando `STRIPE_SECRET_KEY` empieza por `sk_test_`. Guardar un `stripe_account_id` no completa Connect: la cuenta solo se considera conectada cuando Stripe devuelve `details_submitted`, `charges_enabled` y `payouts_enabled`.
+- En local, ejecuta `stripe listen --forward-to localhost:8000/api/v1/webhooks/stripe` y copia el `whsec_...` que muestra a `STRIPE_WEBHOOK_SECRET`. En producción, registra `https://<API>/api/v1/webhooks/stripe` en Stripe Workbench para `checkout.session.completed`, `checkout.session.expired`, `charge.refunded` y `refund.updated`.
+- Google Calendar/Meet usa exactamente `BACKEND_URL/api/v1/integrations/google/callback`. Mientras la pantalla de consentimiento esté en **Testing**, añade cada cuenta en Google Auth Platform → Audience → Test users. Habilita también Google Calendar API.
+- Zoom usa exactamente el valor de `ZOOM_REDIRECT_URI`. Debe ser una URL HTTPS estable y no-localhost; el desarrollo local puede usar una página pública que reenvíe `code` y `state` al callback local. Copia la URL completa tanto en OAuth Redirect URL como en OAuth Allow Lists de la app de desarrollo de Zoom; protocolo, host, ruta y barra final deben coincidir.
+- Tras un callback correcto aparece una fila `google` o `zoom` en `integration_connections`. Un botón pulsado sin esa fila no significa que la integración haya terminado.
+
 ## Tecnologías
 
 - React + TypeScript + Vite.

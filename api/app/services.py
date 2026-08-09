@@ -25,6 +25,42 @@ def platform_fee(amount_cents: int) -> int:
     return round(amount_cents * settings.platform_fee_percent / 100)
 
 
+def stripe_account_status(account_id: str | None) -> dict[str, Any]:
+    """Return the usable Connect state, not merely whether an ID was saved."""
+    if not account_id:
+        return {"status": "not_connected", "ready": False, "requirements_due": 0}
+    if not settings.stripe_secret_key:
+        return {"status": "unavailable", "ready": False, "requirements_due": 0}
+
+    stripe.api_key = settings.stripe_secret_key
+    try:
+        account = stripe.Account.retrieve(account_id)
+    except stripe.StripeError as exc:
+        logger.warning("No se pudo consultar la cuenta Connect %s: %s", account_id, exc)
+        return {"status": "unavailable", "ready": False, "requirements_due": 0}
+
+    requirements = account.get("requirements") or {}
+    ready = bool(
+        account.get("details_submitted")
+        and account.get("charges_enabled")
+        and account.get("payouts_enabled")
+    )
+    return {
+        "status": "active" if ready else "pending",
+        "ready": ready,
+        "requirements_due": len(requirements.get("currently_due") or []),
+    }
+
+
+def require_ready_stripe_account(account_id: str | None) -> str:
+    state = stripe_account_status(account_id)
+    if state["status"] == "unavailable":
+        raise HTTPException(503, "No se pudo comprobar Stripe Connect en este momento")
+    if not state["ready"]:
+        raise HTTPException(409, "El entrenador aún no ha completado Stripe Connect")
+    return account_id or ""
+
+
 class SupabaseAdmin:
     def __init__(self) -> None:
         self.base = f"{settings.supabase_url.rstrip('/')}/rest/v1"
@@ -280,6 +316,8 @@ async def create_checkout(
     coaches = await db.select("coach_profiles", user_id=f"eq.{service['coach_id']}")
     if not coaches or coaches[0]["verification_status"] != "verified":
         raise HTTPException(409, "Este entrenador aún no puede aceptar reservas")
+    if settings.stripe_secret_key:
+        require_ready_stripe_account(coaches[0].get("stripe_account_id"))
     normalized_start = starts_at if starts_at.tzinfo else starts_at.replace(tzinfo=timezone.utc)
     if normalized_start <= datetime.now(timezone.utc):
         raise HTTPException(422, "La reserva debe ser futura")
@@ -355,6 +393,8 @@ async def create_package_checkout(user_id: str, service_id: str, frontend_url: s
     stripe_account = coaches[0].get("stripe_account_id")
     if not stripe_account:
         raise HTTPException(409, "El entrenador no ha completado Stripe Connect")
+    if settings.stripe_secret_key:
+        require_ready_stripe_account(stripe_account)
 
     package = await db.insert(
         "booking_packages",
@@ -419,6 +459,8 @@ def oauth_url(provider: str, user_id: str) -> str:
     if provider == "zoom":
         if not settings.zoom_client_id or not settings.zoom_client_secret:
             raise HTTPException(503, "Zoom no está configurado")
+        if not settings.zoom_redirect_uri.startswith("https://") or "localhost" in settings.zoom_redirect_uri:
+            raise HTTPException(503, "Zoom requiere una URL de callback HTTPS no-localhost")
         query = urlencode({"response_type": "code", "client_id": settings.zoom_client_id, "redirect_uri": settings.zoom_redirect_uri, "state": state})
         return f"{settings.zoom_oauth_url}?{query}"
     if provider == "google":

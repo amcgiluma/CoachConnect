@@ -23,7 +23,8 @@ class Settings(BaseSettings):
     zoom_client_id: str = ""
     zoom_client_secret: str = ""
     zoom_oauth_url: str = "https://zoom.us/oauth/authorize"
-    zoom_redirect_uri: str = "http://localhost:8000/api/v1/integrations/zoom/callback"
+    # Zoom General Apps require a stable non-localhost HTTPS callback via ZOOM_REDIRECT_URI.
+    zoom_redirect_uri: str = ""
     google_oauth_url: str = "https://accounts.google.com/o/oauth2/v2/auth"
     demo_mode: bool = True
 
