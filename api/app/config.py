@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     # Zoom General Apps require a stable non-localhost HTTPS callback via ZOOM_REDIRECT_URI.
     zoom_redirect_uri: str = ""
     google_oauth_url: str = "https://accounts.google.com/o/oauth2/v2/auth"
+    internal_cron_secret: str = ""
     demo_mode: bool = True
 
     model_config = SettingsConfigDict(env_file=(".env", "api/.env", "api/.env.local"), extra="ignore")

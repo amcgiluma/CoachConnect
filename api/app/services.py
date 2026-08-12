@@ -9,6 +9,7 @@ import logging
 import time
 from typing import Any
 from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
 
 import httpx
 import stripe
@@ -61,11 +62,59 @@ def require_ready_stripe_account(account_id: str | None) -> str:
     return account_id or ""
 
 
+def capture_payment_intent(payment_intent_id: str, idempotency_key: str) -> dict[str, Any]:
+    if not settings.stripe_secret_key:
+        if settings.demo_mode and settings.environment in {"development", "test", "testing"}:
+            return {"id": payment_intent_id, "status": "succeeded"}
+        raise HTTPException(503, "Stripe no está configurado")
+    stripe.api_key = settings.stripe_secret_key
+    try:
+        return stripe.PaymentIntent.capture(payment_intent_id, idempotency_key=idempotency_key)
+    except stripe.StripeError as exc:
+        raise HTTPException(502, "Stripe no pudo capturar la autorización") from exc
+
+
+def cancel_payment_intent(payment_intent_id: str, idempotency_key: str) -> dict[str, Any]:
+    if not settings.stripe_secret_key:
+        if settings.demo_mode and settings.environment in {"development", "test", "testing"}:
+            return {"id": payment_intent_id, "status": "canceled"}
+        raise HTTPException(503, "Stripe no está configurado")
+    stripe.api_key = settings.stripe_secret_key
+    try:
+        return stripe.PaymentIntent.cancel(payment_intent_id, idempotency_key=idempotency_key)
+    except stripe.StripeError as exc:
+        raise HTTPException(502, "Stripe no pudo liberar la autorización") from exc
+
+
+def refund_destination_payment(payment_intent_id: str, idempotency_key: str) -> dict[str, Any]:
+    if not settings.stripe_secret_key:
+        if settings.demo_mode and settings.environment in {"development", "test", "testing"}:
+            return {"id": f"demo-refund-{payment_intent_id}", "status": "succeeded"}
+        raise HTTPException(503, "Stripe no está configurado")
+    stripe.api_key = settings.stripe_secret_key
+    try:
+        intent = stripe.PaymentIntent.retrieve(payment_intent_id)
+        latest_charge = intent.get("latest_charge")
+        if not latest_charge:
+            raise HTTPException(409, "El pago todavía no tiene un cargo reembolsable")
+        return stripe.Refund.create(
+            charge=latest_charge,
+            reverse_transfer=True,
+            refund_application_fee=True,
+            idempotency_key=idempotency_key,
+        )
+    except HTTPException:
+        raise
+    except stripe.StripeError as exc:
+        raise HTTPException(502, "Stripe no pudo procesar el reembolso") from exc
+
+
 class SupabaseAdmin:
     def __init__(self) -> None:
         self.base = f"{settings.supabase_url.rstrip('/')}/rest/v1"
         self.headers = {
             "apikey": settings.supabase_secret_key,
+            "Authorization": f"Bearer {settings.supabase_secret_key}",
             "Content-Type": "application/json",
             "Prefer": "return=representation",
         }
@@ -129,6 +178,9 @@ class SupabaseAdmin:
         rows = await self.request("POST", table, json=payload)
         return rows[0]
 
+    async def insert_many(self, table: str, payload: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return await self.request("POST", table, json=payload)
+
     async def upsert(self, table: str, payload: dict[str, Any], on_conflict: str) -> dict[str, Any]:
         rows = await self.request(
             "POST", table, params={"on_conflict": on_conflict}, json=payload,
@@ -138,6 +190,9 @@ class SupabaseAdmin:
 
     async def update(self, table: str, payload: dict[str, Any], **filters: str) -> list[dict[str, Any]]:
         return await self.request("PATCH", table, params=filters, json=payload)
+
+    async def delete(self, table: str, **filters: str) -> list[dict[str, Any]]:
+        return await self.request("DELETE", table, params=filters)
 
     async def rpc(self, function: str, payload: dict[str, Any]) -> dict[str, Any]:
         rows = await self.request("POST", f"rpc/{function}", json=payload)
@@ -313,6 +368,8 @@ async def create_checkout(
     if not services:
         raise HTTPException(404, "Servicio no encontrado")
     service = services[0]
+    if service["coach_id"] == user_id:
+        raise HTTPException(409, "No puedes reservar un entrenamiento contigo mismo")
     coaches = await db.select("coach_profiles", user_id=f"eq.{service['coach_id']}")
     if not coaches or coaches[0]["verification_status"] != "verified":
         raise HTTPException(409, "Este entrenador aún no puede aceptar reservas")
@@ -333,6 +390,20 @@ async def create_checkout(
             "p_platform_fee_percent": settings.platform_fee_percent,
         },
     )
+    request_row: dict[str, Any] | None = None
+    if service.get("booking_mode") == "request":
+        if normalized_start < datetime.now(timezone.utc) + timedelta(hours=36):
+            await db.update("bookings", {"status": "cancelled"}, id=f"eq.{booking['id']}")
+            raise HTTPException(409, "Las solicitudes necesitan al menos 36 horas de antelación")
+        request_row = await db.insert(
+            "booking_requests",
+            {
+                "booking_id": booking["id"],
+                "consumer_id": user_id,
+                "coach_id": service["coach_id"],
+                "expires_at": (datetime.now(timezone.utc) + timedelta(hours=12)).isoformat(),
+            },
+        )
     if not settings.stripe_secret_key:
         if not (settings.demo_mode and settings.environment in {"development", "test", "testing"}):
             await db.update("bookings", {"status": "cancelled"}, id=f"eq.{booking['id']}")
@@ -353,14 +424,18 @@ async def create_checkout(
         }],
         "success_url": f"{return_url}/reservas?checkout=success&booking={booking['id']}",
         "cancel_url": f"{return_url}/entrenadores/{service['coach_id']}?checkout=cancelled",
-        "metadata": {"booking_id": booking["id"]},
+        "metadata": {"booking_id": booking["id"], **({"request_id": request_row["id"]} if request_row else {})},
+        "expires_at": int(time.time()) + 1800,
     }
     stripe_account = coaches[0].get("stripe_account_id")
     if stripe_account:
         checkout_args["payment_intent_data"] = {
             "application_fee_amount": platform_fee(amount),
             "transfer_data": {"destination": stripe_account},
+            **({"capture_method": "manual"} if request_row else {}),
         }
+    if request_row:
+        checkout_args["payment_method_types"] = ["card"]
     try:
         session = stripe.checkout.Session.create(**checkout_args)
     except stripe.StripeError as exc:
@@ -375,17 +450,29 @@ async def create_checkout(
             "stripe_checkout_session_id": session.id,
             "amount_cents": amount,
             "platform_fee_cents": platform_fee(amount),
+            "capture_method": "manual" if request_row else "automatic",
+            "authorization_expires_at": request_row.get("expires_at") if request_row else None,
+            "idempotency_key": f"checkout:{booking['id']}",
         },
     )
     return {"booking_id": booking["id"], "checkout_url": session.url, "status": "pending_payment"}
 
 
-async def create_package_checkout(user_id: str, service_id: str, frontend_url: str | None = None) -> dict[str, Any]:
+async def create_package_checkout(
+    user_id: str,
+    service_id: str,
+    frontend_url: str | None = None,
+    starts_at: datetime | None = None,
+    occurrences: list[datetime] | None = None,
+    client_timezone: str = "Europe/Madrid",
+) -> dict[str, Any]:
     services = await db.select("coach_services", id=f"eq.{service_id}", active="eq.true")
     if not services:
         raise HTTPException(404, "Servicio no encontrado")
     service = services[0]
-    if service["package_size"] <= 1:
+    if service["coach_id"] == user_id:
+        raise HTTPException(409, "No puedes comprar ni reservar tu propio servicio")
+    if service["package_size"] <= 1 or service.get("offer_type", "flex_pack") == "single":
         raise HTTPException(409, "Este servicio no es un bono")
     coaches = await db.select("coach_profiles", user_id=f"eq.{service['coach_id']}")
     if not coaches or coaches[0]["verification_status"] != "verified":
@@ -396,17 +483,80 @@ async def create_package_checkout(user_id: str, service_id: str, frontend_url: s
     if settings.stripe_secret_key:
         require_ready_stripe_account(stripe_account)
 
-    package = await db.insert(
-        "booking_packages",
-        {
-            "consumer_id": user_id,
-            "coach_id": service["coach_id"],
-            "service_id": service_id,
-            "total_sessions": service["package_size"],
-            "amount_cents": service["price_cents"],
-            "status": "pending",
-        },
-    )
+    series: dict[str, Any] | None = None
+    if service.get("offer_type") == "recurring_plan":
+        schedule_mode = service.get("recurring_schedule_mode", "fixed")
+        if schedule_mode == "flexible":
+            if not occurrences or len(occurrences) != int(service["package_size"]):
+                raise HTTPException(422, f"Elige exactamente {service['package_size']} fechas para el plan")
+            normalized_occurrences = [item if item.tzinfo else item.replace(tzinfo=timezone.utc) for item in occurrences]
+            if len({item.astimezone(timezone.utc) for item in normalized_occurrences}) != len(normalized_occurrences):
+                raise HTTPException(422, "No puedes repetir una fecha en el plan")
+            occurrence_values = [item.astimezone(timezone.utc).isoformat() for item in sorted(normalized_occurrences)]
+        else:
+            if starts_at is None:
+                raise HTTPException(422, "Elige el primer horario del plan")
+            normalized_start = starts_at if starts_at.tzinfo else starts_at.replace(tzinfo=timezone.utc)
+            try:
+                local_anchor = normalized_start.astimezone(ZoneInfo(client_timezone))
+            except Exception as exc:
+                raise HTTPException(422, "Zona horaria no válida") from exc
+            cadence = int(service.get("cadence_weeks") or 1)
+            occurrence_values = [
+                (local_anchor + timedelta(weeks=index * cadence)).astimezone(timezone.utc).isoformat()
+                for index in range(int(service["package_size"]))
+            ]
+        series = await db.rpc(
+            "create_recurring_package_hold",
+            {
+                "p_consumer_id": user_id,
+                "p_service_id": service_id,
+                "p_starts_at": occurrence_values,
+                "p_timezone": client_timezone,
+                "p_meeting_provider": "meet",
+            },
+        )
+        packages = await db.select("booking_packages", id=f"eq.{series['package_id']}")
+        package = packages[0]
+    else:
+        expiry = datetime.now(timezone.utc) + timedelta(days=int(service.get("expiry_days") or 90))
+        package = await db.insert(
+            "booking_packages",
+            {
+                "consumer_id": user_id,
+                "coach_id": service["coach_id"],
+                "service_id": service_id,
+                "total_sessions": service["package_size"],
+                "amount_cents": service["price_cents"],
+                "status": "pending",
+                "offer_type": "flex_pack",
+                "expires_at": expiry.isoformat(),
+                "terms_snapshot": {
+                    "price_cents": service["price_cents"],
+                    "session_count": service["package_size"],
+                    "expiry_days": service.get("expiry_days") or 90,
+                    "booking_mode": service.get("booking_mode") or "instant",
+                },
+            },
+        )
+
+    request_row: dict[str, Any] | None = None
+    if service.get("booking_mode") == "request":
+        if starts_at and starts_at.astimezone(timezone.utc) < datetime.now(timezone.utc) + timedelta(hours=36):
+            await db.update("booking_packages", {"status": "cancelled"}, id=f"eq.{package['id']}")
+            if series:
+                await db.update("bookings", {"status": "cancelled"}, series_id=f"eq.{series['series_id']}")
+            raise HTTPException(409, "Las solicitudes necesitan al menos 36 horas de antelación")
+        request_row = await db.insert(
+            "booking_requests",
+            {
+                "package_id": package["id"],
+                "series_id": series["series_id"] if series else None,
+                "consumer_id": user_id,
+                "coach_id": service["coach_id"],
+                "expires_at": (datetime.now(timezone.utc) + timedelta(hours=12)).isoformat(),
+            },
+        )
     if not settings.stripe_secret_key:
         if settings.demo_mode and settings.environment in {"development", "test", "testing"}:
             return {"package_id": package["id"], "checkout_url": None, "status": "pending"}
@@ -430,10 +580,13 @@ async def create_package_checkout(user_id: str, service_id: str, frontend_url: s
             }],
             success_url=f"{return_url}/reservas?checkout=success&package={package['id']}",
             cancel_url=f"{return_url}/entrenadores/{service['coach_id']}?checkout=cancelled",
-            metadata={"package_id": package["id"]},
+            metadata={"package_id": package["id"], **({"request_id": request_row["id"]} if request_row else {})},
+            expires_at=int(time.time()) + 1800,
+            **({"payment_method_types": ["card"]} if request_row else {}),
             payment_intent_data={
                 "application_fee_amount": platform_fee(service["price_cents"]),
                 "transfer_data": {"destination": stripe_account},
+                **({"capture_method": "manual"} if request_row else {}),
             },
         )
     except stripe.StripeError as exc:
@@ -449,9 +602,17 @@ async def create_package_checkout(user_id: str, service_id: str, frontend_url: s
             "stripe_checkout_session_id": session.id,
             "amount_cents": service["price_cents"],
             "platform_fee_cents": platform_fee(service["price_cents"]),
+            "capture_method": "manual" if request_row else "automatic",
+            "authorization_expires_at": request_row.get("expires_at") if request_row else None,
+            "idempotency_key": f"checkout:{package['id']}",
         },
     )
-    return {"package_id": package["id"], "checkout_url": session.url, "status": "pending"}
+    return {
+        "package_id": package["id"],
+        "checkout_url": session.url,
+        "status": "pending",
+        **({"series_id": series["series_id"], "booking_ids": series["booking_ids"]} if series else {}),
+    }
 
 
 def oauth_url(provider: str, user_id: str) -> str:

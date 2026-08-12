@@ -1,4 +1,5 @@
 import httpx
+import logging
 from fastapi import Header, HTTPException, status
 
 from .config import settings
@@ -6,6 +7,7 @@ from .schemas import AuthUser
 
 
 _auth_client: httpx.AsyncClient | None = None
+logger = logging.getLogger(__name__)
 
 
 def _get_auth_client() -> httpx.AsyncClient:
@@ -40,6 +42,12 @@ async def current_user(authorization: str | None = Header(default=None)) -> Auth
         headers={"apikey": api_key, "Authorization": f"Bearer {token}"},
     )
     if response.status_code != 200:
+        error_code = "unknown"
+        try:
+            error_code = response.json().get("error_code") or response.json().get("code") or "unknown"
+        except ValueError:
+            pass
+        logger.warning("Supabase rechazó la validación de sesión (%s, %s)", response.status_code, error_code)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sesión no válida o caducada")
     payload = response.json()
     return AuthUser(id=payload["id"], email=payload.get("email"))
