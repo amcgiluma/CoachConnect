@@ -41,6 +41,7 @@ class CoachSummary(BaseModel):
     responds_now: bool
     verified: bool
     languages: list[str] = Field(default_factory=lambda: ["es"])
+    specialties: list[str] = Field(default_factory=list)
     match_reasons: list[str] = []
 
 
@@ -72,6 +73,39 @@ class ServiceCreateRequest(BaseModel):
     duration_minutes: int = Field(ge=20, le=240)
     price_cents: int = Field(ge=500, le=100000)
     package_size: int = Field(default=1, ge=1, le=24)
+    offer_type: str = "single"
+    booking_mode: str = "instant"
+    expiry_days: int | None = Field(default=None, ge=30, le=365)
+    cadence_weeks: int | None = None
+    recurring_schedule_mode: str = "fixed"
+
+    @model_validator(mode="after")
+    def validate_offer(self):
+        if self.offer_type not in {"single", "flex_pack", "recurring_plan"}:
+            raise ValueError("Tipo de oferta no válido")
+        if self.booking_mode not in {"instant", "request"}:
+            raise ValueError("Modo de reserva no válido")
+        if self.recurring_schedule_mode not in {"fixed", "flexible"}:
+            raise ValueError("Modo de fechas no válido")
+        if self.offer_type == "single":
+            if self.package_size != 1:
+                raise ValueError("Una sesión individual debe incluir una sesión")
+            self.expiry_days = None
+            self.cadence_weeks = None
+            self.recurring_schedule_mode = "fixed"
+        elif self.offer_type == "flex_pack":
+            if self.package_size < 2 or self.expiry_days is None:
+                raise ValueError("El bono necesita entre 2 y 24 sesiones y caducidad")
+            self.cadence_weeks = None
+            self.recurring_schedule_mode = "fixed"
+        else:
+            if self.package_size < 2 or self.expiry_days is None:
+                raise ValueError("El plan necesita sesiones y caducidad")
+            if self.recurring_schedule_mode == "fixed" and self.cadence_weeks not in {1, 2}:
+                raise ValueError("El patrón fijo necesita frecuencia semanal o quincenal")
+            if self.recurring_schedule_mode == "flexible":
+                self.cadence_weeks = None
+        return self
 
 
 class AvailabilityRuleRequest(BaseModel):
@@ -125,6 +159,9 @@ class CheckoutResponse(BaseModel):
 
 class PackageCheckoutRequest(BaseModel):
     service_id: str
+    starts_at: datetime | None = None
+    occurrences: list[datetime] | None = Field(default=None, min_length=2, max_length=24)
+    timezone: str = "Europe/Madrid"
 
 
 class PackageCheckoutResponse(BaseModel):
@@ -182,6 +219,58 @@ class CancellationRequest(BaseModel):
 class ReviewCreateRequest(BaseModel):
     rating: int = Field(ge=1, le=5)
     comment: str = Field(default="", max_length=1200)
+    punctuality: int = Field(ge=1, le=5)
+    communication: int = Field(ge=1, le=5)
+    respect: int = Field(ge=1, le=5)
+    quality: int | None = Field(default=None, ge=1, le=5)
+    personalization: int | None = Field(default=None, ge=1, le=5)
+    safety: int | None = Field(default=None, ge=1, le=5)
+    commitment: int | None = Field(default=None, ge=1, le=5)
+
+
+class SessionReportRequest(BaseModel):
+    outcome: str
+    circumstances: list[str] = Field(default_factory=list, max_length=8)
+    note: str = Field(default="", max_length=1200)
+
+    @model_validator(mode="after")
+    def validate_outcome(self):
+        allowed = {
+            "attended", "attended_with_issues", "client_no_show", "coach_no_show",
+            "mutually_rescheduled", "technical_failure",
+        }
+        allowed_circumstances = {"late_start", "shortened", "technical_issue", "location_issue", "other"}
+        if self.outcome not in allowed:
+            raise ValueError("Resultado de sesión no válido")
+        if any(item not in allowed_circumstances for item in self.circumstances):
+            raise ValueError("Circunstancia no válida")
+        return self
+
+
+class BookingDecisionRequest(BaseModel):
+    decision: str
+    reason_code: str | None = Field(default=None, max_length=80)
+
+    @model_validator(mode="after")
+    def validate_decision(self):
+        if self.decision not in {"accept", "reject"}:
+            raise ValueError("Decisión no válida")
+        return self
+
+
+class ReviewReplyRequest(BaseModel):
+    body: str = Field(min_length=1, max_length=1200)
+
+
+class AdminOutcomeResolutionRequest(BaseModel):
+    outcome: str
+    note: str = Field(default="", max_length=1200)
+
+    @model_validator(mode="after")
+    def validate_resolution(self):
+        if self.outcome not in {"attended", "attended_with_issues", "client_no_show", "coach_no_show", "mutually_rescheduled", "technical_failure"}:
+            raise ValueError("Resolución no válida")
+        return self
 
 
 class CredentialCreateRequest(BaseModel):

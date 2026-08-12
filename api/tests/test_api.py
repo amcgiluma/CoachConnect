@@ -9,7 +9,7 @@ from starlette.requests import Request
 import app.main as main_module
 import app.services as services_module
 from app.main import app
-from app.schemas import AuthUser, CoachSummary, MatchRequest, MessageCreateRequest, ServiceMode
+from app.schemas import AuthUser, CancellationRequest, CoachSummary, MatchRequest, MessageCreateRequest, ReviewCreateRequest, ServiceCreateRequest, ServiceMode
 
 client = TestClient(app)
 
@@ -18,6 +18,53 @@ def test_health() -> None:
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
+
+
+def test_flexible_recurring_service_does_not_require_a_fixed_cadence() -> None:
+    service = ServiceCreateRequest(
+        category_id="category-1", name="Plan flexible", mode=ServiceMode.online,
+        duration_minutes=60, price_cents=12000, package_size=4,
+        offer_type="recurring_plan", expiry_days=90,
+        recurring_schedule_mode="flexible", cadence_weeks=None,
+    )
+
+    assert service.recurring_schedule_mode == "flexible"
+    assert service.cadence_weeks is None
+
+
+def test_single_service_does_not_send_unmigrated_recurring_column(monkeypatch) -> None:
+    class ServiceDatabase:
+        async def insert(self, table: str, payload: dict):
+            assert table == "coach_services"
+            assert "recurring_schedule_mode" not in payload
+            return {"id": "service-1", **payload}
+
+    monkeypatch.setattr(main_module, "db", ServiceDatabase())
+    payload = ServiceCreateRequest(
+        category_id="tennis", name="Tenis con el lete", mode=ServiceMode.in_person,
+        duration_minutes=20, price_cents=500,
+    )
+
+    result = asyncio.run(main_module.create_service(payload, AuthUser(id="coach-1")))
+
+    assert result["name"] == "Tenis con el lete"
+
+
+def test_coach_cannot_checkout_their_own_service(monkeypatch) -> None:
+    class OwnServiceDatabase:
+        async def select(self, table: str, select: str = "*", **filters):
+            assert table == "coach_services"
+            return [{"id": "service-1", "coach_id": "coach-1", "active": True}]
+
+    monkeypatch.setattr(services_module, "db", OwnServiceDatabase())
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(services_module.create_checkout(
+            "coach-1", "service-1", datetime.now(timezone.utc) + timedelta(days=1), "", "meet",
+        ))
+
+    assert error.value.status_code == 409
+    assert "contigo mismo" in error.value.detail
 
 
 def test_categories_are_seeded() -> None:
@@ -81,6 +128,23 @@ def test_matching_uses_fixed_rating_then_response_order() -> None:
         "slow-tie",
         "fast-lower-rating",
     ]
+
+
+def test_matching_checks_every_active_service_specialty() -> None:
+    coach = CoachSummary(
+        id="juanma", name="Juanma el mejor", specialty="Soy el mejor",
+        specialties=["Entrenamiento de calistenia", "Kung fu juanminator", "kung-fu"],
+        category="martial", mode=ServiceMode.hybrid, city="Málaga", rating=0,
+        reviews=0, price_from=10, next_slot="Consulta su agenda", responds_now=False,
+        verified=True,
+    )
+
+    result = main_module.rank_coaches(
+        [coach], MatchRequest(category="martial", subcategory="Kung Fu"),
+    )
+
+    assert [item.id for item in result.items] == ["juanma"]
+    assert "Especialidad específica compatible" in result.items[0].match_reasons
 
 
 class PublicCoachDatabase:
@@ -377,6 +441,16 @@ def test_stripe_account_is_only_ready_when_charges_and_payouts_are_enabled(monke
     assert state == {"status": "pending", "ready": False, "requirements_due": 2}
 
 
+def test_supabase_admin_authenticates_database_calls_as_service_role(monkeypatch) -> None:
+    monkeypatch.setattr(services_module.settings, "supabase_url", "http://127.0.0.1:54321")
+    monkeypatch.setattr(services_module.settings, "supabase_secret_key", "service-role-test-key")
+
+    database = services_module.SupabaseAdmin()
+
+    assert database.headers["apikey"] == "service-role-test-key"
+    assert database.headers["Authorization"] == "Bearer service-role-test-key"
+
+
 def test_integrations_does_not_treat_a_saved_stripe_id_as_connected(monkeypatch) -> None:
     class IntegrationDatabase:
         async def select(self, table: str, select: str = "*", **filters):
@@ -530,3 +604,127 @@ def test_messages_returns_latest_page_in_chronological_order(monkeypatch) -> Non
     ))
 
     assert [row["id"] for row in rows] == ["older", "newest"]
+
+
+class CancellationDatabase:
+    ready = False
+
+    def __init__(self, starts_at: datetime) -> None:
+        self.starts_at = starts_at
+        self.updates: list[tuple[str, dict, dict]] = []
+
+    async def select(self, table: str, select: str = "*", **filters):
+        if table == "bookings":
+            return [{
+                "id": "booking-1", "consumer_id": "consumer-1", "coach_id": "coach-1",
+                "status": "confirmed", "starts_at": self.starts_at.isoformat(), "amount_cents": 4000,
+                "stripe_payment_intent_id": None,
+            }]
+        return []
+
+    async def update(self, table: str, payload: dict, **filters):
+        self.updates.append((table, payload, filters))
+        return [{"id": filters.get("id", "row"), **payload}]
+
+    async def insert(self, table: str, payload: dict):
+        return {"id": "cancellation-1", **payload}
+
+
+def test_client_cannot_cancel_inside_24_hour_window(monkeypatch) -> None:
+    database = CancellationDatabase(datetime.now(timezone.utc) + timedelta(hours=23))
+    monkeypatch.setattr(main_module, "db", database)
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(main_module.cancel_booking(
+            "booking-1", CancellationRequest(reason="Cambio de planes"), AuthUser(id="consumer-1"),
+        ))
+
+    assert error.value.status_code == 409
+    assert database.updates == []
+
+
+def test_coach_cannot_cancel_inside_24_hour_window(monkeypatch) -> None:
+    database = CancellationDatabase(datetime.now(timezone.utc) + timedelta(hours=2))
+    monkeypatch.setattr(main_module, "db", database)
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(main_module.cancel_booking(
+            "booking-1", CancellationRequest(reason="Emergencia"), AuthUser(id="coach-1"),
+        ))
+
+    assert error.value.status_code == 409
+    assert "ambas partes" in error.value.detail
+    assert database.updates == []
+
+
+def test_bilateral_reviews_stay_hidden_until_both_parties_submit(monkeypatch) -> None:
+    class ReviewDatabase:
+        ready = False
+
+        def __init__(self) -> None:
+            self.reviews = [{"id": "review-client", "author_id": "consumer-1"}]
+            self.revealed = False
+
+        async def select(self, table: str, select: str = "*", **filters):
+            if table == "bookings":
+                return [{
+                    "id": "booking-1", "consumer_id": "consumer-1", "coach_id": "coach-1",
+                    "status": "completed", "outcome_status": "attended", "ends_at": datetime.now(timezone.utc).isoformat(),
+                    "outcome_finalized_at": datetime.now(timezone.utc).isoformat(),
+                }]
+            if table == "reviews":
+                return self.reviews
+            return []
+
+        async def upsert(self, table: str, payload: dict, _conflict: str):
+            row = {"id": "review-coach", **payload}
+            self.reviews.append(row)
+            return row
+
+        async def update(self, table: str, payload: dict, **filters):
+            self.revealed = bool(payload.get("revealed_at"))
+            return self.reviews
+
+    database = ReviewDatabase()
+    monkeypatch.setattr(main_module, "db", database)
+    payload = ReviewCreateRequest(
+        rating=5, comment="Cliente comprometido", punctuality=5, communication=5, respect=5, commitment=5,
+    )
+
+    result = asyncio.run(main_module.create_review("booking-1", payload, AuthUser(id="coach-1")))
+
+    assert result["target_role"] == "consumer"
+    assert result["subject_id"] == "consumer-1"
+    assert database.revealed is True
+    assert result["revealed_at"] is not None
+
+
+def test_user_can_review_after_confirming_own_attendance(monkeypatch) -> None:
+    class AttendanceReviewDatabase:
+        ready = False
+
+        async def select(self, table: str, select: str = "*", **filters):
+            if table == "bookings":
+                return [{
+                    "id": "booking-1", "consumer_id": "consumer-1", "coach_id": "coach-1",
+                    "status": "completed", "outcome_status": None,
+                    "ends_at": datetime.now(timezone.utc).isoformat(), "outcome_finalized_at": None,
+                }]
+            if table == "session_reports":
+                return [{"author_id": "consumer-1", "outcome": "attended"}]
+            if table == "reviews":
+                return [{"id": "review-1", "author_id": "consumer-1"}]
+            return []
+
+        async def upsert(self, table: str, payload: dict, _conflict: str):
+            return {"id": "review-1", **payload}
+
+    monkeypatch.setattr(main_module, "db", AttendanceReviewDatabase())
+    payload = ReviewCreateRequest(
+        rating=5, comment="Buena sesión", punctuality=5, communication=5, respect=5,
+        quality=5, personalization=5, safety=5,
+    )
+
+    result = asyncio.run(main_module.create_review("booking-1", payload, AuthUser(id="consumer-1")))
+
+    assert result["target_role"] == "coach"

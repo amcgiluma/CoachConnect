@@ -4,11 +4,13 @@ import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, time as datetime_time, timedelta, timezone
 import logging
+import re
+import unicodedata
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import stripe
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
@@ -16,9 +18,11 @@ from .config import settings
 from .dependencies import close_auth_client, current_user
 from .schemas import (
     AuthUser,
+    AdminOutcomeResolutionRequest,
     AvailabilityExceptionRequest,
     AvailabilityRuleRequest,
     BlockUserRequest,
+    BookingDecisionRequest,
     CancellationRequest,
     Category,
     CategoryWriteRequest,
@@ -39,19 +43,32 @@ from .schemas import (
     PackageBookingRequest,
     ReportCreateRequest,
     RespondsNowRequest,
+    ReviewReplyRequest,
     ReviewCreateRequest,
     ServiceCreateRequest,
     ServiceMode,
+    SessionReportRequest,
     VerificationRequest,
     VideoReviewRequest,
     UserAccessRequest,
 )
 from .seed import CATEGORIES, COACHES
-<<<<<<< HEAD
-from .services import auth_admin_list_users, auth_admin_set_user_access, create_checkout, create_package_checkout, db, exchange_oauth_code, notify_user, oauth_url, provision_meeting, storage_signed_url
-=======
-from .services import create_checkout, create_package_checkout, db, exchange_oauth_code, notify_user, oauth_url, provision_meeting, storage_signed_url, stripe_account_status
->>>>>>> agent/cambio2
+from .services import (
+    auth_admin_list_users,
+    auth_admin_set_user_access,
+    cancel_payment_intent,
+    capture_payment_intent,
+    create_checkout,
+    create_package_checkout,
+    db,
+    exchange_oauth_code,
+    notify_user,
+    oauth_url,
+    provision_meeting,
+    refund_destination_payment,
+    storage_signed_url,
+    stripe_account_status,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -150,7 +167,7 @@ def rank_coaches(
     request: MatchRequest,
 ) -> MatchResponse:
     ranked: list[tuple[tuple[int, int, int, float, int, int], CoachSummary, set[str]]] = []
-    requested_subcategory = (request.subcategory or "").casefold()
+    requested_subcategory = normalize_matching_text(request.subcategory or "")
     requested_languages = {item.casefold() for item in request.languages}
     for coach in items:
         reasons: list[str] = []
@@ -161,9 +178,16 @@ def rank_coaches(
         else:
             failed_filters.add("especialidad")
 
-        subcategory_match = bool(requested_subcategory and requested_subcategory in coach.specialty.casefold())
+        searchable_specialties = [coach.specialty, *coach.specialties]
+        subcategory_match = bool(requested_subcategory and any(
+            requested_subcategory in normalize_matching_text(value)
+            or normalize_matching_text(value) in requested_subcategory
+            for value in searchable_specialties if value
+        ))
         if subcategory_match:
             reasons.append("Especialidad específica compatible")
+        elif requested_subcategory:
+            failed_filters.add("disciplina")
 
         mode_match = not request.mode or coach.mode == request.mode or coach.mode.value == "hibrido"
         if request.mode and mode_match:
@@ -194,7 +218,7 @@ def rank_coaches(
     relaxed_filter: str | None = None
     eligible = exact
     if not eligible:
-        relaxable = ("zona", "modalidad", "presupuesto")
+        relaxable = ("zona", "modalidad", "presupuesto", "disciplina")
         for criterion in relaxable:
             candidates = [item for item in ranked if item[2] == {criterion}]
             if candidates:
@@ -212,8 +236,15 @@ PUBLIC_COACH_SELECT = (
     "user_id,headline,bio,city,mode,verification_status,responds_now,rating,review_count,"
     "languages,preferred_video_provider,profiles(display_name,avatar_url),"
     "coach_services(id,category_id,name,description,mode,duration_minutes,price_cents,package_size,active,"
+    "offer_type,booking_mode,expiry_days,cadence_weeks,acceptance_window_hours,"
     "categories(id,slug,name_es,parent_id))"
 )
+
+
+def normalize_matching_text(value: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", value.casefold())
+    without_accents = "".join(character for character in decomposed if not unicodedata.combining(character))
+    return re.sub(r"[^a-z0-9]+", " ", without_accents).strip()
 
 
 async def remote_coaches(requested_category: str | None = None) -> list[CoachSummary]:
@@ -242,6 +273,16 @@ async def remote_coaches(requested_category: str | None = None) -> list[CoachSum
                 continue
             compatible_services = [item for item in services if root_category_slug(item) == requested_category]
             primary = min(compatible_services or services, key=lambda item: item["price_cents"])
+            specialty_values = list(dict.fromkeys(
+                value
+                for service in (compatible_services or services)
+                for value in (
+                    service.get("name"), service.get("description"),
+                    (service.get("categories") or {}).get("name_es"),
+                    (service.get("categories") or {}).get("slug"),
+                )
+                if value
+            ))
             result.append(CoachSummary(
                 id=row["user_id"],
                 name=(row.get("profiles") or {}).get("display_name", "Entrenador CoachConnect"),
@@ -257,6 +298,7 @@ async def remote_coaches(requested_category: str | None = None) -> list[CoachSum
                 responds_now=row["responds_now"],
                 verified=row["verification_status"] == "verified",
                 languages=row.get("languages") or ["es"],
+                specialties=specialty_values,
             ))
         if result:
             return result
@@ -291,13 +333,16 @@ async def coach_detail(coach_id: str) -> dict[str, Any]:
 
 
 @app.get("/api/v1/coaches/{coach_id}/slots", tags=["catalog"])
-async def coach_slots(coach_id: str, service_id: str, days: int = Query(default=14, ge=1, le=31)) -> dict[str, Any]:
+async def coach_slots(coach_id: str, service_id: str, days: int = Query(default=31, ge=1, le=62)) -> dict[str, Any]:
     services = await db.select("coach_services", id=f"eq.{service_id}", coach_id=f"eq.{coach_id}", active="eq.true")
     if not services:
         raise HTTPException(404, "Servicio no encontrado")
-    duration = timedelta(minutes=services[0]["duration_minutes"])
+    service = services[0]
+    duration = timedelta(minutes=service["duration_minutes"])
     now = datetime.now(timezone.utc)
-    horizon = now + timedelta(days=days)
+    anchor_horizon = now + timedelta(days=days)
+    series_span_days = (int(service.get("package_size") or 1) - 1) * int(service.get("cadence_weeks") or 1) * 7
+    horizon = anchor_horizon + timedelta(days=series_span_days)
     rules = await db.select("availability_rules", coach_id=f"eq.{coach_id}")
     exceptions = await db.select(
         "availability_exceptions",
@@ -321,7 +366,7 @@ async def coach_slots(coach_id: str, service_id: str, days: int = Query(default=
         for item in [*reservations, *(item for item in exceptions if not item["available"])]
     ]
     windows: list[tuple[datetime, datetime]] = []
-    for offset in range(days + 1):
+    for offset in range(days + series_span_days + 1):
         target = now.date() + timedelta(days=offset)
         for rule in rules:
             if target.weekday() != rule["weekday"]:
@@ -352,7 +397,26 @@ async def coach_slots(coach_id: str, service_id: str, days: int = Query(default=
             if not any(cursor < blocked_end and slot_end > blocked_start for blocked_start, blocked_end in blocked):
                 items.append({"starts_at": cursor.isoformat(), "ends_at": slot_end.isoformat()})
             cursor += timedelta(minutes=30)
-    return {"items": items[:80]}
+    if service.get("offer_type") == "recurring_plan" and service.get("recurring_schedule_mode", "fixed") == "fixed":
+        timezone_name = rules[0].get("timezone") if rules else "Europe/Madrid"
+        zone = ZoneInfo(timezone_name or "Europe/Madrid")
+        available_starts = {item["starts_at"] for item in items}
+        cadence = int(service.get("cadence_weeks") or 1)
+        count = int(service.get("package_size") or 1)
+        anchors: list[dict[str, Any]] = []
+        for item in items:
+            anchor = datetime.fromisoformat(item["starts_at"])
+            if anchor > anchor_horizon:
+                continue
+            local_anchor = anchor.astimezone(zone)
+            occurrences = [
+                (local_anchor + timedelta(weeks=index * cadence)).astimezone(timezone.utc).isoformat()
+                for index in range(count)
+            ]
+            if all(start in available_starts for start in occurrences):
+                anchors.append({**item, "occurrences": occurrences})
+        return {"items": anchors[:80]}
+    return {"items": [item for item in items if datetime.fromisoformat(item["starts_at"]) <= anchor_horizon][:80]}
 
 
 @app.get("/api/v1/me", tags=["account"])
@@ -393,7 +457,12 @@ async def my_coach_profile(user: AuthUser = Depends(current_user)) -> dict[str, 
 
 @app.post("/api/v1/coach/services", tags=["coach"])
 async def create_service(payload: ServiceCreateRequest, user: AuthUser = Depends(current_user)) -> dict[str, Any]:
-    return await db.insert("coach_services", {"coach_id": user.id, **payload.model_dump(mode="json")})
+    service_data = payload.model_dump(mode="json")
+    # Keep single sessions, flexible packs and legacy fixed series compatible
+    # until the optional flexible-schedule migration is deployed remotely.
+    if payload.recurring_schedule_mode == "fixed":
+        service_data.pop("recurring_schedule_mode", None)
+    return await db.insert("coach_services", {"coach_id": user.id, **service_data})
 
 
 @app.get("/api/v1/coach/services", tags=["coach"])
@@ -403,9 +472,12 @@ async def my_services(user: AuthUser = Depends(current_user)) -> list[dict[str, 
 
 @app.put("/api/v1/coach/services/{service_id}", tags=["coach"])
 async def update_service(service_id: str, payload: ServiceCreateRequest, user: AuthUser = Depends(current_user)) -> dict[str, Any]:
+    service_data = payload.model_dump(mode="json")
+    if payload.recurring_schedule_mode == "fixed":
+        service_data.pop("recurring_schedule_mode", None)
     rows = await db.update(
         "coach_services",
-        payload.model_dump(mode="json"),
+        service_data,
         id=f"eq.{service_id}",
         coach_id=f"eq.{user.id}",
     )
@@ -590,7 +662,14 @@ async def package_checkout(
     user: AuthUser = Depends(current_user),
 ) -> PackageCheckoutResponse:
     return PackageCheckoutResponse(
-        **await create_package_checkout(user.id, payload.service_id, frontend_url_for_request(request))
+        **await create_package_checkout(
+            user.id,
+            payload.service_id,
+            frontend_url_for_request(request),
+            payload.starts_at,
+            payload.occurrences,
+            payload.timezone,
+        )
     )
 
 
@@ -598,10 +677,76 @@ async def package_checkout(
 async def packages(user: AuthUser = Depends(current_user)) -> list[dict[str, Any]]:
     return await db.select(
         "booking_packages",
-        select="*,coach_services(name,duration_minutes),coach_profiles(profiles(display_name))",
+        select="*,coach_services(name,duration_minutes,offer_type),coach_profiles(profiles(display_name)),session_credits(id,status,expires_at,booking_id)",
         consumer_id=f"eq.{user.id}",
         order="created_at.desc",
     )
+
+
+async def ensure_package_credits(package: dict[str, Any]) -> None:
+    existing = await db.select("session_credits", package_id=f"eq.{package['id']}")
+    if existing:
+        return
+    expires_at = package.get("expires_at") or (datetime.now(timezone.utc) + timedelta(days=90)).isoformat()
+    await db.insert_many("session_credits", [
+        {
+            "package_id": package["id"],
+            "consumer_id": package["consumer_id"],
+            "coach_id": package["coach_id"],
+            "service_id": package["service_id"],
+            "ordinal": ordinal,
+            "status": "available",
+            "expires_at": expires_at,
+        }
+        for ordinal in range(1, int(package["total_sessions"]) + 1)
+    ])
+
+
+async def advance_training_lifecycle() -> dict[str, Any]:
+    if not getattr(db, "ready", False):
+        return {}
+    result = await db.rpc("advance_training_lifecycle", {})
+    while True:
+        job = await db.rpc("claim_lifecycle_job", {})
+        if not job or not job.get("id"):
+            break
+        try:
+            if job["kind"] != "cancel_authorization":
+                raise RuntimeError(f"Trabajo de ciclo de vida desconocido: {job['kind']}")
+            request_id = (job.get("payload") or {}).get("request_id")
+            requests = await db.select("booking_requests", id=f"eq.{request_id}") if request_id else []
+            if requests:
+                booking_request = requests[0]
+                payment_filter = (
+                    {"package_id": f"eq.{booking_request['package_id']}"}
+                    if booking_request.get("package_id")
+                    else {"booking_id": f"eq.{booking_request['booking_id']}"}
+                )
+                payments = await db.select("payments", **payment_filter)
+                payment = payments[0] if payments else None
+                if payment and payment.get("stripe_payment_intent_id") and payment.get("status") in {"pending", "authorized"}:
+                    cancel_payment_intent(payment["stripe_payment_intent_id"], f"request-expired:{request_id}")
+                    await db.update("payments", {"status": "cancelled", "updated_at": datetime.now(timezone.utc).isoformat()}, id=f"eq.{payment['id']}")
+                now_iso = datetime.now(timezone.utc).isoformat()
+                if booking_request.get("booking_id"):
+                    await db.update("bookings", {"status": "cancelled", "updated_at": now_iso}, id=f"eq.{booking_request['booking_id']}")
+                elif booking_request.get("package_id"):
+                    await db.update("booking_packages", {"status": "expired"}, id=f"eq.{booking_request['package_id']}")
+                    if booking_request.get("series_id"):
+                        await db.update("booking_series", {"status": "expired", "updated_at": now_iso}, id=f"eq.{booking_request['series_id']}")
+                        await db.update("bookings", {"status": "cancelled", "updated_at": now_iso}, series_id=f"eq.{booking_request['series_id']}")
+            await db.rpc("finish_lifecycle_job", {"p_job_id": job["id"], "p_error": None})
+        except Exception as exc:
+            logger.exception("No se pudo procesar el trabajo de ciclo de vida %s", job.get("id"))
+            await db.rpc("finish_lifecycle_job", {"p_job_id": job["id"], "p_error": str(exc)[:1000]})
+    return result
+
+
+@app.post("/api/v1/internal/lifecycle", tags=["internal"])
+async def run_lifecycle(x_cron_secret: str = Header(default="")) -> dict[str, Any]:
+    if not settings.internal_cron_secret or x_cron_secret != settings.internal_cron_secret:
+        raise HTTPException(401, "Credencial interna no válida")
+    return await advance_training_lifecycle()
 
 
 @app.post("/api/v1/packages/book", tags=["bookings"])
@@ -610,6 +755,21 @@ async def book_with_package(
     background: BackgroundTasks,
     user: AuthUser = Depends(current_user),
 ) -> dict[str, Any]:
+    packages_found = await db.select(
+        "booking_packages", id=f"eq.{payload.package_id}", consumer_id=f"eq.{user.id}", status="eq.active",
+    )
+    if not packages_found:
+        raise HTTPException(409, "El bono no está activo")
+    if packages_found[0]["coach_id"] == user.id:
+        raise HTTPException(409, "No puedes reservar un entrenamiento contigo mismo")
+    if packages_found[0].get("offer_type") == "recurring_plan":
+        raise HTTPException(409, "Las fechas de este plan ya se reservaron al comprarlo")
+    await ensure_package_credits(packages_found[0])
+    credits = await db.select(
+        "session_credits", package_id=f"eq.{payload.package_id}", status="eq.available", order="ordinal.asc", limit="1",
+    )
+    if not credits:
+        raise HTTPException(409, "No quedan sesiones disponibles en el bono")
     booking = await db.rpc(
         "create_package_booking",
         {
@@ -619,15 +779,21 @@ async def book_with_package(
             "p_meeting_provider": payload.meeting_provider,
         },
     )
+    await db.update(
+        "session_credits",
+        {"status": "reserved", "booking_id": booking["id"], "updated_at": datetime.now(timezone.utc).isoformat()},
+        id=f"eq.{credits[0]['id']}", status="eq.available",
+    )
     background.add_task(provision_meeting, booking["id"])
     return booking
 
 
 @app.get("/api/v1/bookings", tags=["bookings"])
 async def bookings(user: AuthUser = Depends(current_user)) -> list[dict[str, Any]]:
+    await advance_training_lifecycle()
     return await db.select(
         "bookings",
-        select="*,coach_services(name,duration_minutes),coach_profiles(headline,profiles(display_name)),profiles(display_name)",
+        select="*,coach_services(name,duration_minutes),coach_profiles(headline,profiles(display_name)),profiles(display_name),session_reports(id,author_id,outcome,circumstances,note),reviews(id,author_id,revealed_at)",
         or_=f"(consumer_id.eq.{user.id},coach_id.eq.{user.id})",
         order="starts_at.desc",
     )
@@ -639,25 +805,261 @@ async def cancel_booking(booking_id: str, payload: CancellationRequest, user: Au
     if not rows or user.id not in {rows[0]["consumer_id"], rows[0]["coach_id"]}:
         raise HTTPException(404, "Reserva no encontrada")
     booking = rows[0]
+    if booking["status"] not in {"pending_payment", "confirmed"}:
+        raise HTTPException(409, "Esta sesión ya no se puede cancelar")
     starts_at = datetime.fromisoformat(booking["starts_at"].replace("Z", "+00:00"))
-    refundable = starts_at - datetime.now(timezone.utc)
-    refund_cents = booking["amount_cents"] if refundable.total_seconds() >= 86400 else 0
-    if refund_cents and booking.get("stripe_payment_intent_id") and settings.stripe_secret_key:
-        stripe.api_key = settings.stripe_secret_key
-        stripe.Refund.create(payment_intent=booking["stripe_payment_intent_id"])
+    remaining = starts_at - datetime.now(timezone.utc)
+    if remaining < timedelta(hours=24):
+        raise HTTPException(409, "La cancelación se cierra 24 horas antes para ambas partes. Si hubo una incidencia, regístrala al finalizar la sesión")
+
+    refund_cents = 0
+    refund_id: str | None = None
+    credits = await db.select("session_credits", booking_id=f"eq.{booking_id}")
+    if credits:
+        await db.update(
+            "session_credits",
+            {"status": "available", "booking_id": None, "updated_at": datetime.now(timezone.utc).isoformat()},
+            id=f"eq.{credits[0]['id']}",
+        )
+        package_rows = await db.select("booking_packages", id=f"eq.{credits[0]['package_id']}") if credits[0].get("package_id") else []
+        if package_rows:
+            await db.update(
+                "booking_packages",
+                {"used_sessions": max(0, int(package_rows[0]["used_sessions"]) - 1), "status": "active"},
+                id=f"eq.{package_rows[0]['id']}",
+            )
+    else:
+        payments = await db.select("payments", booking_id=f"eq.{booking_id}", status="eq.paid")
+        payment_intent_id = (payments[0].get("stripe_payment_intent_id") if payments else None) or booking.get("stripe_payment_intent_id")
+        if payment_intent_id:
+            refund = refund_destination_payment(payment_intent_id, f"booking-cancel:{booking_id}")
+            refund_id = refund.get("id")
+            refund_cents = int(booking["amount_cents"])
+            if payments:
+                await db.update("payments", {"status": "refunded", "stripe_refund_id": refund_id}, id=f"eq.{payments[0]['id']}")
     await db.update("bookings", {"status": "cancelled", "updated_at": datetime.now(timezone.utc).isoformat()}, id=f"eq.{booking_id}")
     cancellation = await db.insert("cancellations", {"booking_id": booking_id, "cancelled_by": user.id, "reason": payload.reason, "refund_cents": refund_cents})
     recipient_id = booking["coach_id"] if booking["consumer_id"] == user.id else booking["consumer_id"]
     await notify_user(recipient_id, "booking_cancelled", "Reserva cancelada", "La otra parte ha cancelado la sesión.", "/reservas")
-    return cancellation
+    await advance_training_lifecycle()
+    return {**cancellation, "credit_restored": bool(credits), "refund_id": refund_id}
+
+
+@app.post("/api/v1/bookings/{booking_id}/outcome", tags=["bookings"])
+async def report_booking_outcome(
+    booking_id: str,
+    payload: SessionReportRequest,
+    user: AuthUser = Depends(current_user),
+) -> dict[str, Any]:
+    await advance_training_lifecycle()
+    rows = await db.select("bookings", id=f"eq.{booking_id}")
+    if not rows or user.id not in {rows[0]["consumer_id"], rows[0]["coach_id"]}:
+        raise HTTPException(404, "Reserva no encontrada")
+    booking = rows[0]
+    if booking["status"] not in {"completed", "disputed"}:
+        raise HTTPException(409, "Podrás confirmar el resultado cuando termine la sesión")
+    if booking.get("outcome_finalized_at"):
+        raise HTTPException(409, "El resultado de esta sesión ya está cerrado")
+    report = await db.upsert(
+        "session_reports",
+        {
+            "booking_id": booking_id,
+            "author_id": user.id,
+            **payload.model_dump(),
+            "response_due_at": (datetime.now(timezone.utc) + timedelta(hours=48)).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        },
+        "booking_id,author_id",
+    )
+    recipient_id = booking["coach_id"] if user.id == booking["consumer_id"] else booking["consumer_id"]
+    await notify_user(recipient_id, "session_outcome", "Confirma cómo fue la sesión", "La otra parte ha registrado el resultado. Tienes 48 horas para responder.", "/reservas")
+    await advance_training_lifecycle()
+    return report
 
 
 @app.post("/api/v1/bookings/{booking_id}/review", tags=["reviews"])
 async def create_review(booking_id: str, payload: ReviewCreateRequest, user: AuthUser = Depends(current_user)) -> dict[str, Any]:
-    rows = await db.select("bookings", id=f"eq.{booking_id}", consumer_id=f"eq.{user.id}", status="eq.completed")
-    if not rows:
-        raise HTTPException(409, "Solo puedes valorar una sesión completada")
-    return await db.insert("reviews", {"booking_id": booking_id, "consumer_id": user.id, "coach_id": rows[0]["coach_id"], **payload.model_dump()})
+    await advance_training_lifecycle()
+    rows = await db.select("bookings", id=f"eq.{booking_id}")
+    if not rows or user.id not in {rows[0]["consumer_id"], rows[0]["coach_id"]}:
+        raise HTTPException(404, "Reserva no encontrada")
+    booking = rows[0]
+    own_reports = await db.select(
+        "session_reports", booking_id=f"eq.{booking_id}", author_id=f"eq.{user.id}", limit="1",
+    )
+    own_attendance_confirmed = bool(own_reports and own_reports[0].get("outcome") in {"attended", "attended_with_issues"})
+    if booking["status"] != "completed" or (
+        booking.get("outcome_status") not in {"attended", "attended_with_issues", "assumed_attended"}
+        and not own_attendance_confirmed
+    ):
+        raise HTTPException(409, "Solo puedes valorar una sesión realizada y sin disputa")
+    if booking.get("outcome_finalized_at") and datetime.fromisoformat(booking["outcome_finalized_at"].replace("Z", "+00:00")) < datetime.now(timezone.utc) - timedelta(days=14):
+        raise HTTPException(409, "El plazo de valoración ha terminado")
+
+    target_role = "coach" if user.id == booking["consumer_id"] else "consumer"
+    subject_id = booking["coach_id"] if target_role == "coach" else booking["consumer_id"]
+    if target_role == "coach" and any(getattr(payload, field) is None for field in ("quality", "personalization", "safety")):
+        raise HTTPException(422, "La valoración del entrenador necesita calidad, personalización y seguridad")
+    if target_role == "consumer" and payload.commitment is None:
+        raise HTTPException(422, "La valoración del cliente necesita compromiso")
+    review = await db.upsert(
+        "reviews",
+        {
+            "booking_id": booking_id,
+            "consumer_id": booking["consumer_id"],
+            "coach_id": booking["coach_id"],
+            "author_id": user.id,
+            "subject_id": subject_id,
+            "target_role": target_role,
+            **payload.model_dump(),
+            "reveal_after": ((datetime.fromisoformat((booking.get("outcome_finalized_at") or booking["ends_at"]).replace("Z", "+00:00"))) + timedelta(days=14)).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        },
+        "booking_id,author_id",
+    )
+    pair = await db.select("reviews", booking_id=f"eq.{booking_id}")
+    if len(pair) >= 2:
+        revealed_at = datetime.now(timezone.utc).isoformat()
+        await db.update("reviews", {"revealed_at": revealed_at, "updated_at": revealed_at}, booking_id=f"eq.{booking_id}")
+        review["revealed_at"] = revealed_at
+    return review
+
+
+@app.get("/api/v1/coaches/{coach_id}/reviews", tags=["reviews"])
+async def public_coach_reviews(coach_id: str) -> dict[str, Any]:
+    await advance_training_lifecycle()
+    reviews = await db.select(
+        "reviews",
+        select="*,profiles!reviews_author_id_fkey(display_name,avatar_url),review_replies(id,body,created_at)",
+        subject_id=f"eq.{coach_id}", target_role="eq.coach", published="eq.true",
+        moderation_status="eq.visible", revealed_at="not.is.null", order="revealed_at.desc",
+    )
+    summary_rows = await db.select("reputation_summaries", profile_id=f"eq.{coach_id}")
+    latest_by_author: dict[str, dict[str, Any]] = {}
+    for review in reviews:
+        if isinstance(review.get("review_replies"), dict):
+            review["review_replies"] = [review["review_replies"]]
+        latest_by_author.setdefault(review["author_id"], review)
+    return {"summary": summary_rows[0] if summary_rows else None, "items": list(latest_by_author.values())}
+
+
+@app.get("/api/v1/coach/reviews", tags=["reviews"])
+async def coach_reviews(user: AuthUser = Depends(current_user)) -> dict[str, Any]:
+    reviews = await db.select(
+        "reviews",
+        select="*,profiles!reviews_author_id_fkey(display_name,avatar_url),review_replies(id,body,created_at)",
+        subject_id=f"eq.{user.id}", target_role="eq.coach", revealed_at="not.is.null", order="revealed_at.desc",
+    )
+    summary_rows = await db.select("reputation_summaries", profile_id=f"eq.{user.id}")
+    for review in reviews:
+        if isinstance(review.get("review_replies"), dict):
+            review["review_replies"] = [review["review_replies"]]
+    return {"summary": summary_rows[0] if summary_rows else None, "items": reviews}
+
+
+@app.get("/api/v1/clients/{client_id}/reputation", tags=["reviews"])
+async def client_reputation(client_id: str, user: AuthUser = Depends(current_user)) -> dict[str, Any]:
+    coach_profiles = await db.select("coach_profiles", user_id=f"eq.{user.id}")
+    if not coach_profiles:
+        raise HTTPException(403, "Solo los entrenadores pueden consultar esta reputación")
+    related_bookings = await db.select("bookings", consumer_id=f"eq.{client_id}", coach_id=f"eq.{user.id}", limit="1")
+    related_conversations = await db.select("conversations", consumer_id=f"eq.{client_id}", coach_id=f"eq.{user.id}", limit="1")
+    if not related_bookings and not related_conversations:
+        raise HTTPException(403, "Necesitas una solicitud, reserva o conversación con este cliente")
+    profiles = await db.select("profiles", select="id,display_name,avatar_url", id=f"eq.{client_id}")
+    summaries = await db.select("reputation_summaries", profile_id=f"eq.{client_id}")
+    reviews = await db.select(
+        "reviews", select="id,rating,comment,punctuality,communication,respect,commitment,revealed_at",
+        subject_id=f"eq.{client_id}", target_role="eq.consumer", revealed_at="not.is.null",
+        moderation_status="eq.visible", order="revealed_at.desc",
+    )
+    return {"profile": profiles[0] if profiles else None, "summary": summaries[0] if summaries else None, "items": reviews}
+
+
+@app.post("/api/v1/reviews/{review_id}/reply", tags=["reviews"])
+async def reply_to_review(review_id: str, payload: ReviewReplyRequest, user: AuthUser = Depends(current_user)) -> dict[str, Any]:
+    reviews = await db.select(
+        "reviews", id=f"eq.{review_id}", subject_id=f"eq.{user.id}", target_role="eq.coach", revealed_at="not.is.null",
+    )
+    if not reviews:
+        raise HTTPException(404, "Reseña no encontrada")
+    existing = await db.select("review_replies", review_id=f"eq.{review_id}")
+    if existing:
+        raise HTTPException(409, "Esta reseña ya tiene respuesta")
+    return await db.insert("review_replies", {"review_id": review_id, "author_id": user.id, "body": payload.body.strip()})
+
+
+@app.get("/api/v1/coach/booking-requests", tags=["bookings"])
+async def coach_booking_requests(user: AuthUser = Depends(current_user)) -> list[dict[str, Any]]:
+    await advance_training_lifecycle()
+    rows = await db.select(
+        "booking_requests",
+        select="*,bookings(starts_at,ends_at,coach_services(name,price_cents)),booking_packages(total_sessions,offer_type,coach_services(name,price_cents))",
+        coach_id=f"eq.{user.id}", order="created_at.desc",
+    )
+    consumer_ids = sorted({row["consumer_id"] for row in rows})
+    profiles = await db.select("profiles", select="id,display_name,avatar_url", id=f"in.({','.join(consumer_ids)})") if consumer_ids else []
+    summaries = await db.select("reputation_summaries", profile_id=f"in.({','.join(consumer_ids)})") if consumer_ids else []
+    profiles_by_id = {item["id"]: item for item in profiles}
+    summaries_by_id = {item["profile_id"]: item for item in summaries}
+    return [{**row, "client": profiles_by_id.get(row["consumer_id"]), "client_reputation": summaries_by_id.get(row["consumer_id"])} for row in rows]
+
+
+@app.post("/api/v1/coach/booking-requests/{request_id}/decision", tags=["bookings"])
+async def decide_booking_request(
+    request_id: str,
+    payload: BookingDecisionRequest,
+    background: BackgroundTasks,
+    user: AuthUser = Depends(current_user),
+) -> dict[str, Any]:
+    requests = await db.select("booking_requests", id=f"eq.{request_id}", coach_id=f"eq.{user.id}")
+    if not requests or requests[0]["status"] != "awaiting_coach":
+        raise HTTPException(409, "La solicitud ya no está pendiente")
+    booking_request = requests[0]
+    if datetime.fromisoformat(booking_request["expires_at"].replace("Z", "+00:00")) <= datetime.now(timezone.utc):
+        raise HTTPException(409, "La solicitud ha caducado")
+    payment_filter = {"package_id": f"eq.{booking_request['package_id']}"} if booking_request.get("package_id") else {"booking_id": f"eq.{booking_request['booking_id']}"}
+    payments = await db.select("payments", **payment_filter)
+    payment = payments[0] if payments else None
+    intent_id = payment.get("stripe_payment_intent_id") if payment else None
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    if payload.decision == "accept":
+        if intent_id:
+            capture_payment_intent(intent_id, f"request-accept:{request_id}")
+        await db.update("booking_requests", {"status": "accepted", "decided_at": now_iso, "reason_code": payload.reason_code}, id=f"eq.{request_id}")
+        if payment:
+            await db.update("payments", {"status": "paid", "updated_at": now_iso}, id=f"eq.{payment['id']}")
+        if booking_request.get("booking_id"):
+            await db.update("bookings", {"status": "confirmed", "request_expires_at": None, "updated_at": now_iso}, id=f"eq.{booking_request['booking_id']}")
+            background.add_task(provision_meeting, booking_request["booking_id"])
+        else:
+            packages_found = await db.select("booking_packages", id=f"eq.{booking_request['package_id']}")
+            if packages_found:
+                await db.update("booking_packages", {"status": "active"}, id=f"eq.{booking_request['package_id']}")
+                if packages_found[0].get("offer_type") == "flex_pack":
+                    await ensure_package_credits({**packages_found[0], "status": "active"})
+            if booking_request.get("series_id"):
+                await db.update("booking_series", {"status": "confirmed", "updated_at": now_iso}, id=f"eq.{booking_request['series_id']}")
+                series_bookings = await db.update("bookings", {"status": "confirmed", "updated_at": now_iso}, series_id=f"eq.{booking_request['series_id']}")
+                for item in series_bookings:
+                    background.add_task(provision_meeting, item["id"])
+        await notify_user(booking_request["consumer_id"], "request_accepted", "Solicitud aceptada", "El entrenador ha confirmado tu reserva.", "/reservas")
+    else:
+        if intent_id:
+            cancel_payment_intent(intent_id, f"request-reject:{request_id}")
+        await db.update("booking_requests", {"status": "rejected", "decided_at": now_iso, "reason_code": payload.reason_code}, id=f"eq.{request_id}")
+        if payment:
+            await db.update("payments", {"status": "cancelled", "updated_at": now_iso}, id=f"eq.{payment['id']}")
+        if booking_request.get("booking_id"):
+            await db.update("bookings", {"status": "cancelled", "updated_at": now_iso}, id=f"eq.{booking_request['booking_id']}")
+        else:
+            await db.update("booking_packages", {"status": "cancelled"}, id=f"eq.{booking_request['package_id']}")
+            if booking_request.get("series_id"):
+                await db.update("booking_series", {"status": "cancelled", "updated_at": now_iso}, id=f"eq.{booking_request['series_id']}")
+                await db.update("bookings", {"status": "cancelled", "updated_at": now_iso}, series_id=f"eq.{booking_request['series_id']}")
+        await notify_user(booking_request["consumer_id"], "request_rejected", "Solicitud no aceptada", "La autorización se ha liberado y los horarios vuelven a estar disponibles.", "/reservas")
+    return {"id": request_id, "status": "accepted" if payload.decision == "accept" else "rejected"}
 
 
 @app.get("/api/v1/conversations", tags=["chat"])
@@ -741,6 +1143,44 @@ async def send_message(
             "attachment_path": payload.attachment_path,
         },
     )
+    if user.id == conversation["coach_id"]:
+        try:
+            previous_coach_messages, first_customer_messages = await asyncio.gather(
+                db.select(
+                    "messages", select="id", conversation_id=f"eq.{conversation_id}", sender_id=f"eq.{user.id}",
+                    created_at=f"lt.{row['created_at']}", limit="1",
+                ),
+                db.select(
+                    "messages", select="created_at", conversation_id=f"eq.{conversation_id}", sender_id=f"eq.{conversation['consumer_id']}",
+                    order="created_at.asc", limit="1",
+                ),
+            )
+            if not previous_coach_messages and first_customer_messages:
+                first_at = datetime.fromisoformat(first_customer_messages[0]["created_at"].replace("Z", "+00:00"))
+                response_at = datetime.fromisoformat(row["created_at"].replace("Z", "+00:00"))
+                minutes = max(0, round((response_at - first_at).total_seconds() / 60))
+                await db.upsert(
+                    "coach_response_samples",
+                    {
+                        "conversation_id": conversation_id, "coach_id": user.id,
+                        "first_customer_message_at": first_at.isoformat(), "first_coach_response_at": response_at.isoformat(),
+                        "response_minutes": minutes,
+                    },
+                    "conversation_id",
+                )
+                samples = await db.select(
+                    "coach_response_samples", select="response_minutes", coach_id=f"eq.{user.id}",
+                    first_coach_response_at=f"gte.{(datetime.now(timezone.utc) - timedelta(days=90)).isoformat()}",
+                )
+                values = sorted(int(item["response_minutes"]) for item in samples)
+                median = values[len(values) // 2] if len(values) % 2 else round((values[len(values) // 2 - 1] + values[len(values) // 2]) / 2)
+                await db.upsert(
+                    "reputation_summaries",
+                    {"profile_id": user.id, "role": "coach", "median_response_minutes": median, "updated_at": datetime.now(timezone.utc).isoformat()},
+                    "profile_id",
+                )
+        except Exception as exc:
+            logger.warning("No se pudo actualizar la rapidez de respuesta del entrenador %s: %s", user.id, exc)
     await db.update("conversations", {"last_message_at": row["created_at"]}, id=f"eq.{conversation_id}")
     sender_name = sender_rows[0]["display_name"] if sender_rows else (user.email or "Alguien")
     title = "Nueva conversación" if not existing_messages else "Nuevo mensaje"
@@ -906,7 +1346,37 @@ async def stripe_webhook(request: Request, background: BackgroundTasks) -> dict[
         metadata = obj.get("metadata", {})
         booking_id = metadata.get("booking_id")
         package_id = metadata.get("package_id")
-        if booking_id:
+        request_id = metadata.get("request_id")
+        now_iso = datetime.now(timezone.utc).isoformat()
+        if request_id:
+            requests = await db.select("booking_requests", id=f"eq.{request_id}")
+            if requests:
+                booking_request = requests[0]
+                await db.update("booking_requests", {"status": "awaiting_coach"}, id=f"eq.{request_id}")
+                payment_filter = {"package_id": f"eq.{package_id}"} if package_id else {"booking_id": f"eq.{booking_id}"}
+                await db.update(
+                    "payments",
+                    {"status": "authorized", "stripe_payment_intent_id": obj.get("payment_intent"), "updated_at": now_iso},
+                    **payment_filter,
+                )
+                if booking_id:
+                    await db.update(
+                        "bookings",
+                        {"status": "pending_payment", "stripe_payment_intent_id": obj.get("payment_intent"),
+                         "request_expires_at": booking_request["expires_at"], "updated_at": now_iso},
+                        id=f"eq.{booking_id}",
+                    )
+                else:
+                    await db.update("booking_packages", {"status": "awaiting_coach"}, id=f"eq.{package_id}")
+                    if booking_request.get("series_id"):
+                        await db.update("booking_series", {"status": "awaiting_coach", "updated_at": now_iso}, id=f"eq.{booking_request['series_id']}")
+                        await db.update(
+                            "bookings",
+                            {"status": "pending_payment", "request_expires_at": booking_request["expires_at"], "updated_at": now_iso},
+                            series_id=f"eq.{booking_request['series_id']}",
+                        )
+                await notify_user(booking_request["coach_id"], "booking_request", "Nueva solicitud de reserva", "Revisa la reputación del cliente y responde antes de 12 horas.", "/profesional?tab=requests")
+        elif booking_id:
             await db.update("bookings", {"status": "confirmed", "stripe_payment_intent_id": obj.get("payment_intent"), "updated_at": datetime.now(timezone.utc).isoformat()}, id=f"eq.{booking_id}")
             await db.update("payments", {"status": "paid", "stripe_payment_intent_id": obj.get("payment_intent"), "updated_at": datetime.now(timezone.utc).isoformat()}, booking_id=f"eq.{booking_id}")
             bookings_found = await db.select("bookings", id=f"eq.{booking_id}")
@@ -920,6 +1390,16 @@ async def stripe_webhook(request: Request, background: BackgroundTasks) -> dict[
             await db.update("payments", {"status": "paid", "stripe_payment_intent_id": obj.get("payment_intent"), "updated_at": datetime.now(timezone.utc).isoformat()}, package_id=f"eq.{package_id}")
             packages_found = await db.select("booking_packages", id=f"eq.{package_id}")
             if packages_found:
+                package = packages_found[0]
+                if package.get("offer_type") == "recurring_plan":
+                    series_found = await db.select("booking_series", package_id=f"eq.{package_id}")
+                    if series_found:
+                        await db.update("booking_series", {"status": "confirmed", "updated_at": now_iso}, id=f"eq.{series_found[0]['id']}")
+                        series_bookings = await db.update("bookings", {"status": "confirmed", "updated_at": now_iso}, series_id=f"eq.{series_found[0]['id']}")
+                        for item in series_bookings:
+                            background.add_task(provision_meeting, item["id"])
+                else:
+                    await ensure_package_credits(package)
                 await notify_user(packages_found[0]["consumer_id"], "package_activated", "Bono activado", "Ya puedes reservar tus sesiones.", "/reservas")
     elif event["type"] == "checkout.session.expired":
         metadata = obj.get("metadata", {})
@@ -931,6 +1411,12 @@ async def stripe_webhook(request: Request, background: BackgroundTasks) -> dict[
         elif package_id:
             await db.update("booking_packages", {"status": "expired"}, id=f"eq.{package_id}")
             await db.update("payments", {"status": "failed"}, package_id=f"eq.{package_id}")
+            series_found = await db.select("booking_series", package_id=f"eq.{package_id}")
+            if series_found:
+                await db.update("booking_series", {"status": "expired"}, id=f"eq.{series_found[0]['id']}")
+                await db.update("bookings", {"status": "cancelled"}, series_id=f"eq.{series_found[0]['id']}")
+        if metadata.get("request_id"):
+            await db.update("booking_requests", {"status": "cancelled"}, id=f"eq.{metadata['request_id']}")
     elif event["type"] in {"charge.refunded", "refund.updated"}:
         payment_intent = obj.get("payment_intent")
         if payment_intent:
@@ -1129,6 +1615,89 @@ async def admin_archive_category(category_id: str, user: AuthUser = Depends(curr
 async def admin_reports(user: AuthUser = Depends(current_user)) -> list[dict[str, Any]]:
     await assert_admin(user.id)
     return await db.select("reports", order="created_at.asc")
+
+
+@app.get("/api/v1/admin/session-disputes", tags=["admin"])
+async def admin_session_disputes(user: AuthUser = Depends(current_user)) -> list[dict[str, Any]]:
+    await assert_admin(user.id)
+    await advance_training_lifecycle()
+    disputes = await db.select(
+        "bookings",
+        select="*,coach_services(name,duration_minutes),session_reports(id,author_id,outcome,circumstances,note,created_at)",
+        status="eq.disputed",
+        order="starts_at.asc",
+    )
+    profile_ids = sorted({profile_id for item in disputes for profile_id in (item["consumer_id"], item["coach_id"])})
+    profiles = await db.select("profiles", select="id,display_name,avatar_url", id=f"in.({','.join(profile_ids)})") if profile_ids else []
+    profiles_by_id = {item["id"]: item for item in profiles}
+    return [
+        {
+            **item,
+            "consumer": profiles_by_id.get(item["consumer_id"]),
+            "coach": profiles_by_id.get(item["coach_id"]),
+        }
+        for item in disputes
+    ]
+
+
+@app.patch("/api/v1/admin/session-disputes/{booking_id}", tags=["admin"])
+async def admin_resolve_session_dispute(
+    booking_id: str,
+    payload: AdminOutcomeResolutionRequest,
+    user: AuthUser = Depends(current_user),
+) -> dict[str, Any]:
+    await assert_admin(user.id)
+    rows = await db.select("bookings", id=f"eq.{booking_id}", status="eq.disputed")
+    if not rows:
+        raise HTTPException(404, "Incidencia de sesión no encontrada")
+    booking = rows[0]
+    restore_credit = payload.outcome in {"coach_no_show", "mutually_rescheduled", "technical_failure"}
+    credits = await db.select("session_credits", booking_id=f"eq.{booking_id}")
+    refund_id: str | None = None
+    if restore_credit and not credits:
+        payments = await db.select("payments", booking_id=f"eq.{booking_id}", status="eq.paid")
+        payment = payments[0] if payments else None
+        payment_intent_id = (payment or {}).get("stripe_payment_intent_id") or booking.get("stripe_payment_intent_id")
+        if payment_intent_id:
+            refund = refund_destination_payment(payment_intent_id, f"dispute-resolution:{booking_id}")
+            refund_id = refund.get("id")
+            if payment:
+                await db.update("payments", {"status": "refunded", "stripe_refund_id": refund_id, "updated_at": datetime.now(timezone.utc).isoformat()}, id=f"eq.{payment['id']}")
+    if credits:
+        credit = credits[0]
+        credit_status = "available" if restore_credit else "consumed"
+        await db.update(
+            "session_credits",
+            {"status": credit_status, "booking_id": None if restore_credit else booking_id, "updated_at": datetime.now(timezone.utc).isoformat()},
+            id=f"eq.{credit['id']}",
+        )
+        if restore_credit and credit.get("package_id"):
+            packages_found = await db.select("booking_packages", id=f"eq.{credit['package_id']}")
+            if packages_found:
+                await db.update(
+                    "booking_packages",
+                    {"used_sessions": max(0, int(packages_found[0]["used_sessions"]) - 1), "status": "active"},
+                    id=f"eq.{credit['package_id']}",
+                )
+    now_iso = datetime.now(timezone.utc).isoformat()
+    resolved = await db.update(
+        "bookings",
+        {"status": "completed", "outcome_status": payload.outcome, "outcome_finalized_at": now_iso, "updated_at": now_iso},
+        id=f"eq.{booking_id}", status="eq.disputed",
+    )
+    if not resolved:
+        raise HTTPException(409, "La incidencia ya fue resuelta")
+    await db.insert("audit_logs", {
+        "actor_id": user.id,
+        "action": "booking.dispute.resolved",
+        "entity_type": "booking",
+        "entity_id": booking_id,
+        "metadata": {"outcome": payload.outcome, "note": payload.note, "credit_restored": restore_credit and bool(credits), "refund_id": refund_id},
+    })
+    for recipient_id in {booking["consumer_id"], booking["coach_id"]}:
+        await notify_user(recipient_id, "session_dispute_resolved", "Incidencia resuelta", "Operaciones ha revisado y cerrado el resultado de la sesión.", "/reservas")
+    await advance_training_lifecycle()
+    return {**resolved[0], "credit_restored": restore_credit and bool(credits), "refund_id": refund_id}
 
 
 @app.get("/api/v1/admin/bookings", tags=["admin"])

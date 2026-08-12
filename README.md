@@ -10,7 +10,9 @@ La implementación cubre:
 
 - Cuestionario de matching con especialidad, modalidad, zona, presupuesto e idioma.
 - Ranking explicable con orden fijo —especialidad, zona, valoraciones y rapidez de respuesta— y relajación controlada de un criterio.
-- Perfiles, agenda real, excepciones, reservas transaccionales sin solapes, cancelaciones, reseñas y bonos.
+- Perfiles, agenda real, excepciones, reservas transaccionales sin solapes y cancelación del cliente hasta 24 horas antes.
+- Confirmación bilateral de asistencia, valoraciones de doble ciego, reputación separada para entrenadores y clientes, respuestas públicas y resolución administrativa de disputas.
+- Bonos flexibles con créditos y planes periódicos semanales o quincenales que reservan toda la serie de forma atómica.
 - Auth Email/Google/Apple, mensajería Realtime, adjuntos privados, bloqueos, denuncias y notificaciones web/email.
 - Portal profesional con onboarding, servicios, agenda, acreditaciones, vídeo, Stripe Connect y videollamadas.
 - Operaciones para validar profesionales y vídeos, moderar, gestionar taxonomía y consultar pagos.
@@ -83,6 +85,7 @@ Variables principales:
 - `SUPABASE_SECRET_KEY`
 - `STRIPE_SECRET_KEY`
 - `STRIPE_WEBHOOK_SECRET`
+- `INTERNAL_CRON_SECRET` (protege el avance periódico de sesiones, plazos y autorizaciones)
 - `TOKEN_ENCRYPTION_KEY`
 - Credenciales OAuth de Google y Zoom, y Resend si se quiere email.
 
@@ -97,7 +100,7 @@ npx supabase db push
 npx supabase db lint --linked
 ```
 
-El orden aplicable es `20260720171236_initial_coachconnect_schema.sql` → `20260720171413_security_hardening.sql` → `20260720172355_complete_coachconnect_mvp.sql` → `20260720172446_advisor_fixes.sql` → `20260724102931_harden_access_and_booking_slots.sql` → `20260724110603_advisor_cleanup.sql`. Antes de producción:
+El orden aplicable termina en `20260811112752_schedule_training_lifecycle.sql`; Supabase aplica automáticamente el historial por marca temporal. Antes de producción:
 
 1. Configura Email, Google y Apple en Auth y registra las URLs de local, Vercel y producción.
 2. Ejecuta los advisors de seguridad y rendimiento desde Supabase.
@@ -106,6 +109,8 @@ El orden aplicable es `20260720171236_initial_coachconnect_schema.sql` → `2026
 ```powershell
 .venv\Scripts\python.exe api/scripts/bootstrap_admin.py admin@dominio.com
 ```
+
+4. Programa una llamada frecuente (por ejemplo, cada cinco minutos) a `POST /api/v1/internal/lifecycle` con la cabecera `X-Cron-Secret`. El valor debe coincidir con `INTERNAL_CRON_SECRET`; la operación es idempotente y libera autorizaciones caducadas.
 
 El proyecto incluye `.cursor/mcp.json` para `https://mcp.supabase.com/mcp`. Reinicia/recarga Cursor y completa OAuth para habilitar sus herramientas.
 

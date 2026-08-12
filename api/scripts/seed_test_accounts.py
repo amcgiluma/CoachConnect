@@ -104,10 +104,18 @@ async def main() -> None:
         users = await seed.auth_users()
         if not users:
             raise SystemExit("Se necesita un usuario Auth existente para derivar alias de correo")
-        owner_email = users[0].get("email", "")
+        owner_email = next(
+            (
+                user.get("email", "")
+                for user in users
+                if user.get("email", "").partition("@")[2].casefold() in {"gmail.com", "googlemail.com"}
+                and not (user.get("raw_user_meta_data", {}) or user.get("user_metadata", {})).get("test_account")
+            ),
+            "",
+        )
         local, separator, domain = owner_email.partition("@")
         if not separator or domain.casefold() not in {"gmail.com", "googlemail.com"}:
-            raise SystemExit("El primer usuario debe usar Gmail para crear alias entregables")
+            raise SystemExit("Se necesita al menos un usuario propietario de Gmail para crear alias entregables")
         local = local.split("+", 1)[0]
         existing_by_email = {user.get("email", "").casefold(): user for user in users}
         category_rows = await seed.rest("GET", "categories", params={"select": "id,slug", "slug": "in.(fitness,martial)"})

@@ -1,7 +1,11 @@
 export type Mode = 'online' | 'presencial' | 'hibrido'
 
 export type Category = { id: string; label: string; kicker: string; examples: string[]; accent: string }
-export type CoachService = { id?: string; name: string; detail: string; price: number; duration?: number; packageSize?: number }
+export type CoachService = {
+  id?: string; name: string; detail: string; price: number; duration?: number; packageSize?: number
+  offerType?: 'single' | 'flex_pack' | 'recurring_plan'; bookingMode?: 'instant' | 'request'; recurringScheduleMode?: 'fixed' | 'flexible'
+  expiryDays?: number | null; cadenceWeeks?: number | null
+}
 export type Coach = {
   id: string; name: string; initials: string; specialty: string; category: string; mode: Mode; city: string
   rating: number; reviews: number; price: number; response: string; nextSlot: string; verified: boolean
