@@ -1,5 +1,6 @@
 from datetime import datetime, time
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -84,9 +85,23 @@ class ServiceCreateRequest(BaseModel):
     expiry_days: int | None = Field(default=None, ge=30, le=365)
     cadence_weeks: int | None = None
     recurring_schedule_mode: str = "fixed"
+    booking_window_days: int = Field(default=31, ge=7, le=365)
+    available_weekdays: list[int] = Field(default_factory=lambda: list(range(7)), min_length=1, max_length=7)
+    available_start_time: str = "09:00"
+    available_end_time: str = "19:00"
 
     @model_validator(mode="after")
     def validate_offer(self):
+        if any(day < 0 or day > 6 for day in self.available_weekdays):
+            raise ValueError("Los días disponibles no son válidos")
+        self.available_weekdays = sorted(set(self.available_weekdays))
+        try:
+            starts_at = time.fromisoformat(self.available_start_time)
+            ends_at = time.fromisoformat(self.available_end_time)
+        except ValueError as exc:
+            raise ValueError("Las horas del servicio no son válidas") from exc
+        if ends_at <= starts_at:
+            raise ValueError("La hora final del servicio debe ser posterior a la inicial")
         if self.offer_type not in {"single", "flex_pack", "recurring_plan"}:
             raise ValueError("Tipo de oferta no válido")
         if self.booking_mode not in {"instant", "request"}:
@@ -112,6 +127,10 @@ class ServiceCreateRequest(BaseModel):
             if self.recurring_schedule_mode == "flexible":
                 self.cadence_weeks = None
         return self
+
+
+class BookingSettingsRequest(BaseModel):
+    min_booking_notice_minutes: int = Field(ge=0, le=10080)
 
 
 class AvailabilityRuleRequest(BaseModel):
@@ -305,6 +324,23 @@ class VerificationRequest(BaseModel):
 
 class UserAccessRequest(BaseModel):
     enabled: bool
+
+
+class AdminSanctionCreateRequest(BaseModel):
+    user_id: str
+    kind: Literal["account", "messaging", "training"]
+    duration_hours: int = Field(ge=1, le=8760)
+    reason: str = Field(min_length=3, max_length=500)
+    report_id: str | None = None
+
+
+class AdminSanctionRevokeRequest(BaseModel):
+    reason: str = Field(default="Revocada manualmente por administración", max_length=500)
+
+
+class AdminReportUpdateRequest(BaseModel):
+    status: Literal["reviewing", "resolved", "dismissed"]
+    resolution_note: str = Field(default="", max_length=1200)
 
 
 class OAuthUrlResponse(BaseModel):

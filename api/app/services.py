@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+import asyncio
+from datetime import datetime, time as datetime_time, timedelta, timezone
 import base64
 from html import escape
 import hashlib
@@ -24,6 +25,42 @@ logger = logging.getLogger(__name__)
 
 def platform_fee(amount_cents: int) -> int:
     return round(amount_cents * settings.platform_fee_percent / 100)
+
+
+def validate_booking_schedule(
+    service: dict[str, Any],
+    coach: dict[str, Any],
+    starts_at_values: list[datetime],
+    timezone_name: str = "Europe/Madrid",
+) -> None:
+    """Enforce the same lead-time, weekday and horizon rules exposed as slots."""
+    now = datetime.now(timezone.utc)
+    earliest = now + timedelta(minutes=int(coach.get("min_booking_notice_minutes") or 0))
+    latest = now + timedelta(days=int(service.get("booking_window_days") or 31))
+    allowed_weekdays = set(service.get("available_weekdays") or range(7))
+    service_start = datetime_time.fromisoformat(service.get("available_start_time") or "00:00")
+    service_end = datetime_time.fromisoformat(service.get("available_end_time") or "23:59:59")
+    try:
+        local_zone = ZoneInfo(timezone_name)
+    except Exception as exc:
+        raise HTTPException(422, "Zona horaria no válida") from exc
+    for value in starts_at_values:
+        normalized = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        normalized = normalized.astimezone(timezone.utc)
+        if normalized < earliest:
+            raise HTTPException(409, "Ese horario no cumple el margen mínimo de reserva del entrenador")
+        if normalized > latest:
+            raise HTTPException(409, "Ese horario queda fuera del periodo de reserva de este servicio")
+        if normalized.astimezone(local_zone).weekday() not in allowed_weekdays:
+            raise HTTPException(409, "Este servicio no se ofrece ese día de la semana")
+        local_value = normalized.astimezone(local_zone)
+        local_end = local_value + timedelta(minutes=int(service.get("duration_minutes") or 0))
+        if (
+            local_value.time() < service_start
+            or local_end.date() != local_value.date()
+            or local_end.time() > service_end
+        ):
+            raise HTTPException(409, "Este servicio no se ofrece a esa hora")
 
 
 def stripe_account_status(account_id: str | None) -> dict[str, Any]:
@@ -204,6 +241,32 @@ class SupabaseAdmin:
 db = SupabaseAdmin()
 
 
+SANCTION_DETAILS = {
+    "account": "Tu cuenta está suspendida temporalmente por el equipo de CoachConnect",
+    "messaging": "Tu acceso a la mensajería está suspendido temporalmente",
+    "training": "Tu acceso a nuevos entrenamientos está suspendido temporalmente",
+}
+
+
+async def assert_user_capability(user_id: str, kind: str, database: Any | None = None) -> None:
+    """Reject a capability while an administrator restriction is active."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    rows = await (database or db).select(
+        "moderation_sanctions",
+        select="id,kind,expires_at",
+        user_id=f"eq.{user_id}",
+        kind=f"eq.{kind}",
+        starts_at=f"lte.{now_iso}",
+        expires_at=f"gt.{now_iso}",
+        revoked_at="is.null",
+        limit="1",
+    )
+    if rows:
+        expires_at = datetime.fromisoformat(rows[0]["expires_at"].replace("Z", "+00:00"))
+        formatted_expiry = expires_at.astimezone(ZoneInfo("Europe/Madrid")).strftime("%d/%m/%Y a las %H:%M")
+        raise HTTPException(403, f"{SANCTION_DETAILS.get(kind, 'Esta acción está restringida')} hasta el {formatted_expiry}")
+
+
 def _auth_admin_headers() -> dict[str, str]:
     if not settings.supabase_url or not settings.supabase_secret_key:
         raise HTTPException(503, "Supabase Auth no está configurado")
@@ -237,11 +300,16 @@ async def auth_admin_list_users() -> list[dict[str, Any]]:
 
 async def auth_admin_set_user_access(user_id: str, enabled: bool) -> dict[str, Any]:
     """Ban or unban an Auth user using Supabase's server-only Admin API."""
+    return await auth_admin_set_user_ban_duration(user_id, None if enabled else 876000)
+
+
+async def auth_admin_set_user_ban_duration(user_id: str, duration_hours: int | None) -> dict[str, Any]:
+    """Apply or clear an Auth ban for a bounded number of hours."""
     async with httpx.AsyncClient(timeout=15) as client:
         response = await client.put(
             f"{settings.supabase_url.rstrip('/')}/auth/v1/admin/users/{user_id}",
             headers=_auth_admin_headers(),
-            json={"ban_duration": "none" if enabled else "876000h"},
+            json={"ban_duration": "none" if duration_hours is None else f"{duration_hours}h"},
         )
     if response.status_code >= 400:
         detail = response.json().get("message", "No se pudo actualizar el acceso") if response.content else "No se pudo actualizar el acceso"
@@ -370,6 +438,10 @@ async def create_checkout(
     service = services[0]
     if service["coach_id"] == user_id:
         raise HTTPException(409, "No puedes reservar un entrenamiento contigo mismo")
+    await asyncio.gather(
+        assert_user_capability(user_id, "training"),
+        assert_user_capability(service["coach_id"], "training"),
+    )
     coaches = await db.select("coach_profiles", user_id=f"eq.{service['coach_id']}")
     if not coaches or coaches[0]["verification_status"] != "verified":
         raise HTTPException(409, "Este entrenador aún no puede aceptar reservas")
@@ -378,6 +450,7 @@ async def create_checkout(
     normalized_start = starts_at if starts_at.tzinfo else starts_at.replace(tzinfo=timezone.utc)
     if normalized_start <= datetime.now(timezone.utc):
         raise HTTPException(422, "La reserva debe ser futura")
+    validate_booking_schedule(service, coaches[0], [normalized_start])
     amount = service["price_cents"]
     booking = await db.rpc(
         "create_pending_booking",
@@ -472,6 +545,10 @@ async def create_package_checkout(
     service = services[0]
     if service["coach_id"] == user_id:
         raise HTTPException(409, "No puedes comprar ni reservar tu propio servicio")
+    await asyncio.gather(
+        assert_user_capability(user_id, "training"),
+        assert_user_capability(service["coach_id"], "training"),
+    )
     if service["package_size"] <= 1 or service.get("offer_type", "flex_pack") == "single":
         raise HTTPException(409, "Este servicio no es un bono")
     coaches = await db.select("coach_profiles", user_id=f"eq.{service['coach_id']}")
@@ -493,6 +570,7 @@ async def create_package_checkout(
             if len({item.astimezone(timezone.utc) for item in normalized_occurrences}) != len(normalized_occurrences):
                 raise HTTPException(422, "No puedes repetir una fecha en el plan")
             occurrence_values = [item.astimezone(timezone.utc).isoformat() for item in sorted(normalized_occurrences)]
+            schedule_values = sorted(normalized_occurrences)
         else:
             if starts_at is None:
                 raise HTTPException(422, "Elige el primer horario del plan")
@@ -506,6 +584,8 @@ async def create_package_checkout(
                 (local_anchor + timedelta(weeks=index * cadence)).astimezone(timezone.utc).isoformat()
                 for index in range(int(service["package_size"]))
             ]
+            schedule_values = [datetime.fromisoformat(item) for item in occurrence_values]
+        validate_booking_schedule(service, coaches[0], schedule_values)
         series = await db.rpc(
             "create_recurring_package_hold",
             {

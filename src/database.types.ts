@@ -602,6 +602,7 @@ export type Database = {
           latitude: number | null
           longitude: number | null
           mode: Database["public"]["Enums"]["service_mode"]
+          min_booking_notice_minutes: number
           preferred_video_provider: string
           rating: number
           responds_now: boolean
@@ -627,6 +628,7 @@ export type Database = {
           latitude?: number | null
           longitude?: number | null
           mode?: Database["public"]["Enums"]["service_mode"]
+          min_booking_notice_minutes?: number
           preferred_video_provider?: string
           rating?: number
           responds_now?: boolean
@@ -652,6 +654,7 @@ export type Database = {
           latitude?: number | null
           longitude?: number | null
           mode?: Database["public"]["Enums"]["service_mode"]
+          min_booking_notice_minutes?: number
           preferred_video_provider?: string
           rating?: number
           responds_now?: boolean
@@ -723,7 +726,11 @@ export type Database = {
         Row: {
           acceptance_window_hours: number
           active: boolean
+          available_end_time: string
+          available_start_time: string
+          available_weekdays: number[]
           booking_mode: string
+          booking_window_days: number
           cadence_weeks: number | null
           category_id: string | null
           coach_id: string
@@ -741,7 +748,11 @@ export type Database = {
         Insert: {
           acceptance_window_hours?: number
           active?: boolean
+          available_end_time?: string
+          available_start_time?: string
+          available_weekdays?: number[]
           booking_mode?: string
+          booking_window_days?: number
           cadence_weeks?: number | null
           category_id?: string | null
           coach_id: string
@@ -759,7 +770,11 @@ export type Database = {
         Update: {
           acceptance_window_hours?: number
           active?: boolean
+          available_end_time?: string
+          available_start_time?: string
+          available_weekdays?: number[]
           booking_mode?: string
+          booking_window_days?: number
           cadence_weeks?: number | null
           category_id?: string | null
           coach_id?: string
@@ -1048,6 +1063,80 @@ export type Database = {
           },
         ]
       }
+      moderation_sanctions: {
+        Row: {
+          created_at: string
+          expires_at: string
+          id: string
+          imposed_by: string | null
+          kind: string
+          reason: string
+          report_id: string | null
+          revocation_reason: string
+          revoked_at: string | null
+          revoked_by: string | null
+          starts_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          expires_at: string
+          id?: string
+          imposed_by?: string | null
+          kind: string
+          reason: string
+          report_id?: string | null
+          revocation_reason?: string
+          revoked_at?: string | null
+          revoked_by?: string | null
+          starts_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          expires_at?: string
+          id?: string
+          imposed_by?: string | null
+          kind?: string
+          reason?: string
+          report_id?: string | null
+          revocation_reason?: string
+          revoked_at?: string | null
+          revoked_by?: string | null
+          starts_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "moderation_sanctions_imposed_by_fkey"
+            columns: ["imposed_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "moderation_sanctions_report_id_fkey"
+            columns: ["report_id"]
+            isOneToOne: false
+            referencedRelation: "reports"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "moderation_sanctions_revoked_by_fkey"
+            columns: ["revoked_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "moderation_sanctions_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       notifications: {
         Row: {
           action_url: string | null
@@ -1221,6 +1310,9 @@ export type Database = {
           reason: string
           reported_user_id: string | null
           reporter_id: string
+          resolution_note: string
+          resolved_at: string | null
+          resolved_by: string | null
           status: string
         }
         Insert: {
@@ -1232,6 +1324,9 @@ export type Database = {
           reason: string
           reported_user_id?: string | null
           reporter_id: string
+          resolution_note?: string
+          resolved_at?: string | null
+          resolved_by?: string | null
           status?: string
         }
         Update: {
@@ -1243,6 +1338,9 @@ export type Database = {
           reason?: string
           reported_user_id?: string | null
           reporter_id?: string
+          resolution_note?: string
+          resolved_at?: string | null
+          resolved_by?: string | null
           status?: string
         }
         Relationships: [
@@ -1270,6 +1368,13 @@ export type Database = {
           {
             foreignKeyName: "reports_reporter_id_fkey"
             columns: ["reporter_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "reports_resolved_by_fkey"
+            columns: ["resolved_by"]
             isOneToOne: false
             referencedRelation: "profiles"
             referencedColumns: ["id"]

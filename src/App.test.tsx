@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
-import App, { AccountIdentity, AccountNavigation, type Profile } from './App'
+import App, { AccountIdentity, AccountNavigation, BookingDetailsDialog, SessionCalendar, type Profile } from './App'
 
 afterEach(() => {
   cleanup()
@@ -10,6 +10,25 @@ afterEach(() => {
 })
 
 describe('CoachConnect', () => {
+  it('opens a complete booking detail from the session calendar', () => {
+    const booking = {
+      id: 'booking-1', starts_at: '2026-08-18T16:00:00+02:00', ends_at: '2026-08-18T17:00:00+02:00', status: 'confirmed', amount_cents: 3500,
+      video_url: 'https://meet.google.com/example', notes: 'Trabajaremos técnica de sentadilla.', profiles: { display_name: 'Ana Cliente' },
+      coach_services: { name: 'Fuerza 1:1', duration_minutes: 60, mode: 'online' as const },
+    }
+    const onSelect = vi.fn()
+    const { rerender } = render(<SessionCalendar bookings={[booking]} perspective="coach" onSelect={onSelect} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /ver detalles de fuerza 1:1 con ana cliente/i }))
+    expect(onSelect).toHaveBeenCalledWith(booking)
+
+    rerender(<BookingDetailsDialog booking={booking} perspective="coach" onClose={vi.fn()} />)
+    expect(screen.getByRole('dialog')).toHaveTextContent('Ana Cliente')
+    expect(screen.getByRole('dialog')).toHaveTextContent('60 minutos')
+    expect(screen.getByRole('dialog')).toHaveTextContent('35,00 €')
+    expect(screen.getByRole('link', { name: /entrar a la videollamada/i })).toHaveAttribute('href', booking.video_url)
+  })
+
   it('provides real navigation between profile, messages and professional profile', () => {
     render(<MemoryRouter><AccountNavigation active="messages" /></MemoryRouter>)
 
@@ -48,6 +67,17 @@ describe('CoachConnect', () => {
     expect(screen.getByRole('heading', { name: /qué tipo de entrenamiento buscas/i })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /musculación/i }))
     expect(screen.getByRole('heading', { name: /cómo quieres entrenar/i })).toBeInTheDocument()
+  })
+
+  it('does not replace a database error with sample coaches', async () => {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Supabase no disponible'))
+    window.history.pushState({}, '', '/buscar?category=fitness')
+
+    render(<App />)
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('No mostramos perfiles de muestra')
+    expect(screen.queryByText('Inés Martín')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Reintentar' })).toBeInTheDocument()
   })
 
   it('moves directly from specialty to mode without asking for a goal', () => {

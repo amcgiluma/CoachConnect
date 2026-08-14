@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
@@ -9,7 +10,7 @@ from starlette.requests import Request
 import app.main as main_module
 import app.services as services_module
 from app.main import app
-from app.schemas import AuthUser, CancellationRequest, CoachSummary, MatchRequest, MessageCreateRequest, ReviewCreateRequest, ServiceCreateRequest, ServiceMode
+from app.schemas import AuthUser, CancellationRequest, CoachSummary, MatchRequest, MessageCreateRequest, ReportCreateRequest, ReviewCreateRequest, ServiceCreateRequest, ServiceMode
 
 client = TestClient(app)
 
@@ -30,6 +31,58 @@ def test_flexible_recurring_service_does_not_require_a_fixed_cadence() -> None:
 
     assert service.recurring_schedule_mode == "flexible"
     assert service.cadence_weeks is None
+
+
+def test_service_normalizes_its_available_weekdays_and_horizon() -> None:
+    service = ServiceCreateRequest(
+        category_id="category-1", name="Fuerza de fin de semana", mode=ServiceMode.online,
+        duration_minutes=60, price_cents=3500, booking_window_days=60,
+        available_weekdays=[6, 5, 6],
+    )
+
+    assert service.available_weekdays == [5, 6]
+    assert service.booking_window_days == 60
+
+
+def test_service_validates_its_available_hours() -> None:
+    with pytest.raises(ValueError, match="hora final"):
+        ServiceCreateRequest(
+            category_id="category-1", name="Fuerza de tarde", mode=ServiceMode.online,
+            duration_minutes=60, price_cents=3500,
+            available_start_time="19:00", available_end_time="18:00",
+        )
+
+
+def test_booking_schedule_enforces_notice_horizon_and_weekday() -> None:
+    now = datetime.now(timezone.utc)
+    service = {"booking_window_days": 60, "available_weekdays": [now.weekday()]}
+    coach = {"min_booking_notice_minutes": 120}
+
+    with pytest.raises(HTTPException) as notice_error:
+        services_module.validate_booking_schedule(service, coach, [now + timedelta(minutes=60)])
+    assert notice_error.value.status_code == 409
+
+    with pytest.raises(HTTPException) as horizon_error:
+        services_module.validate_booking_schedule(service, coach, [now + timedelta(days=61)])
+    assert horizon_error.value.status_code == 409
+
+
+def test_booking_schedule_enforces_service_hours() -> None:
+    local_zone = ZoneInfo("Europe/Madrid")
+    starts_at = (datetime.now(local_zone) + timedelta(days=8)).replace(hour=8, minute=0, second=0, microsecond=0)
+    service = {
+        "booking_window_days": 60,
+        "available_weekdays": [starts_at.weekday()],
+        "available_start_time": "09:00",
+        "available_end_time": "12:00",
+        "duration_minutes": 60,
+    }
+
+    with pytest.raises(HTTPException) as time_error:
+        services_module.validate_booking_schedule(service, {"min_booking_notice_minutes": 0}, [starts_at])
+
+    assert time_error.value.status_code == 409
+    assert "hora" in time_error.value.detail
 
 
 def test_single_service_does_not_send_unmigrated_recurring_column(monkeypatch) -> None:
@@ -197,6 +250,19 @@ def test_remote_coach_uses_parent_category_and_only_verified_profiles(monkeypatc
     assert not coach_query[1].startswith("*")
 
 
+def test_remote_database_errors_are_not_replaced_with_demo_coaches(monkeypatch) -> None:
+    class BrokenRemoteDatabase:
+        ready = True
+
+        async def select(self, table: str, select: str = "*", **filters):
+            raise HTTPException(400, "remote schema error")
+
+    monkeypatch.setattr(main_module, "db", BrokenRemoteDatabase())
+
+    with pytest.raises(HTTPException, match="remote schema error"):
+        asyncio.run(main_module.remote_coaches("fitness"))
+
+
 def test_public_coach_detail_uses_safe_projection(monkeypatch) -> None:
     database = PublicCoachDatabase()
     monkeypatch.setattr(main_module, "db", database)
@@ -282,6 +348,55 @@ def test_coach_calendar_is_scoped_to_owner_and_range(monkeypatch) -> None:
     assert result == {"bookings": [], "exceptions": []}
     assert all(filters["coach_id"] == "eq.coach-1" for _, filters in database.calls)
     assert database.calls[0][1]["starts_at"].startswith("lt.2026-08-03")
+
+
+def test_coach_can_save_different_hours_for_each_weekday(monkeypatch) -> None:
+    class AvailabilityDatabase:
+        def __init__(self) -> None:
+            self.rows: list[dict] = []
+
+        async def request(self, method: str, table: str, **kwargs):
+            assert (method, table) == ("DELETE", "availability_rules")
+            return []
+
+        async def insert(self, table: str, payload: dict):
+            assert table == "availability_rules"
+            self.rows.append(payload)
+            return payload
+
+    database = AvailabilityDatabase()
+    monkeypatch.setattr(main_module, "db", database)
+    rules = [
+        main_module.AvailabilityRuleRequest(weekday=0, starts_at="07:00", ends_at="11:00"),
+        main_module.AvailabilityRuleRequest(weekday=4, starts_at="16:00", ends_at="20:30"),
+    ]
+
+    asyncio.run(main_module.replace_availability(rules, AuthUser(id="coach-1")))
+
+    assert [(row["weekday"], row["starts_at"], row["ends_at"]) for row in database.rows] == [
+        (0, "07:00", "11:00"),
+        (4, "16:00", "20:30"),
+    ]
+
+
+def test_coach_can_add_one_off_availability(monkeypatch) -> None:
+    class ExceptionDatabase:
+        async def insert(self, table: str, payload: dict):
+            assert table == "availability_exceptions"
+            return payload
+
+    monkeypatch.setattr(main_module, "db", ExceptionDatabase())
+    payload = main_module.AvailabilityExceptionRequest(
+        starts_at=datetime(2026, 8, 30, 9, tzinfo=timezone.utc),
+        ends_at=datetime(2026, 8, 30, 12, tzinfo=timezone.utc),
+        available=True,
+        label="Clase especial",
+    )
+
+    row = asyncio.run(main_module.create_availability_exception(payload, AuthUser(id="coach-1")))
+
+    assert row["available"] is True
+    assert row["coach_id"] == "coach-1"
 
 
 def test_suspended_coach_cannot_resubmit_credentials(monkeypatch) -> None:
@@ -658,6 +773,50 @@ def test_messages_returns_latest_page_in_chronological_order(monkeypatch) -> Non
     ))
 
     assert [row["id"] for row in rows] == ["older", "newest"]
+
+
+def test_conversation_report_infers_the_other_participant(monkeypatch) -> None:
+    database = ChatDatabase()
+    monkeypatch.setattr(main_module, "db", database)
+
+    row = asyncio.run(main_module.create_report(
+        ReportCreateRequest(
+            conversation_id="conversation-1",
+            reason="Comportamiento abusivo",
+            details="Ha insistido después de pedirle que parase.",
+        ),
+        AuthUser(id="consumer-1", email="consumer@example.com"),
+    ))
+
+    assert row["reported_user_id"] == "coach-1"
+    assert database.inserted[-1][0] == "reports"
+    assert database.inserted[-1][1]["reporter_id"] == "consumer-1"
+
+
+def test_active_messaging_sanction_prevents_sending(monkeypatch) -> None:
+    class SanctionedChatDatabase(ChatDatabase):
+        async def select(self, table: str, select: str = "*", **filters):
+            if table == "moderation_sanctions":
+                return [{
+                    "id": "sanction-1", "kind": "messaging",
+                    "expires_at": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
+                }]
+            return await super().select(table, select, **filters)
+
+    database = SanctionedChatDatabase()
+    monkeypatch.setattr(main_module, "db", database)
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(main_module.send_message(
+            "conversation-1",
+            MessageCreateRequest(body="Este mensaje no debe guardarse"),
+            BackgroundTasks(),
+            AuthUser(id="consumer-1", email="consumer@example.com"),
+        ))
+
+    assert error.value.status_code == 403
+    assert "mensajería" in error.value.detail
+    assert database.inserted == []
 
 
 class CancellationDatabase:

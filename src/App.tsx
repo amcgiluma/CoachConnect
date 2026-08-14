@@ -3,11 +3,11 @@ import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate,
 import { useTranslation } from 'react-i18next'
 import { Toaster, toast } from 'sonner'
 import {
-  ArrowLeft, ArrowRight, BadgeCheck, Bell, CalendarDays, Camera, Check, ChevronDown,
+  ArrowLeft, ArrowRight, BadgeCheck, Ban, Bell, CalendarDays, Camera, Check, ChevronDown,
   ChevronLeft, ChevronRight, Clock3, CreditCard, Eye, FileCheck2, Globe2, Languages,
-  LayoutDashboard, LoaderCircle, LogOut, MapPin, MessageCircle, Paperclip, Pencil,
-  Plus, Send, Settings2, ShieldCheck, SlidersHorizontal, Sparkles, Star, Upload,
-  UserRound, Video, X, Zap,
+  Dumbbell, Flag, LayoutDashboard, LoaderCircle, LogOut, MapPin, MessageCircle,
+  MessageSquareOff, Paperclip, Pencil, Plus, Send, Settings2, ShieldAlert, ShieldCheck,
+  SlidersHorizontal, Sparkles, Star, Unlock, Upload, UserRound, UserRoundX, Video, X, Zap,
 } from 'lucide-react'
 import { AuthProvider, useAuth } from './auth'
 import { AuthModal } from './components/AuthModal'
@@ -74,6 +74,33 @@ type ChatMessage = {
   created_at: string
   delivery_status?: 'sending'
 }
+type ConversationRecord = {
+  id: string
+  consumer_id: string
+  coach_id: string
+  last_message_at: string
+  consumer?: Pick<Profile, 'id' | 'display_name' | 'avatar_url' | 'role'> | null
+  coach?: Pick<Profile, 'id' | 'display_name' | 'avatar_url' | 'role'> | null
+  blocked_by_me: boolean
+  blocked_me: boolean
+}
+type BlockedUserRecord = {
+  blocker_id: string
+  blocked_id: string
+  created_at: string
+  profile?: Pick<Profile, 'id' | 'display_name' | 'avatar_url' | 'role'> | null
+}
+type ModerationSanction = {
+  id: string
+  user_id: string
+  kind: 'account' | 'messaging' | 'training'
+  reason: string
+  starts_at: string
+  expires_at: string
+  report_id?: string | null
+  revoked_at?: string | null
+  profile?: Pick<Profile, 'id' | 'display_name' | 'avatar_url' | 'role'> | null
+}
 type CoachServiceRecord = {
   id: string
   category_id: string
@@ -89,6 +116,10 @@ type CoachServiceRecord = {
   expiry_days?: number | null
   cadence_weeks?: number | null
   recurring_schedule_mode?: 'fixed' | 'flexible'
+  booking_window_days?: number
+  available_weekdays?: number[]
+  available_start_time?: string
+  available_end_time?: string
   categories?: { slug?: string; name_es?: string } | null
 }
 type CoachProfileRecord = {
@@ -105,6 +136,7 @@ type CoachProfileRecord = {
   languages?: string[]
   preferred_video_provider?: 'meet' | 'zoom' | 'custom'
   presentation_video_url?: string | null
+  min_booking_notice_minutes?: number
   profiles?: { display_name?: string; avatar_url?: string | null } | null
   coach_services?: CoachServiceRecord[]
 }
@@ -115,12 +147,15 @@ type BookingRecord = {
   status: string
   amount_cents: number
   video_url?: string | null
+  notes?: string | null
+  meeting_provider?: string | null
   consumer_id?: string
   coach_id?: string
   outcome_status?: string | null
   outcome_finalized_at?: string | null
-  coach_services?: { name?: string; duration_minutes?: number } | null
+  coach_services?: { name?: string; description?: string; duration_minutes?: number; mode?: Mode } | null
   profiles?: { display_name?: string } | null
+  coach_profiles?: { headline?: string; profiles?: { display_name?: string } | null } | null
   session_reports?: Array<{ id: string; author_id: string; outcome: string }>
   reviews?: Array<{
     id: string
@@ -162,6 +197,7 @@ type AdminUser = {
     verification_status: string
     verification_note?: string | null
   } | null
+  active_sanctions?: ModerationSanction[]
 }
 const CoachMap = lazy(() =>
   import('./components/CoachMap').then((module) => ({
@@ -219,6 +255,10 @@ const coachFromProfile = (row: CoachProfileRecord, fallback?: Coach): Coach => {
       expiryDays: item.expiry_days,
       cadenceWeeks: item.cadence_weeks,
       recurringScheduleMode: item.recurring_schedule_mode || (item.offer_type === 'recurring_plan' && item.cadence_weeks == null ? 'flexible' : 'fixed'),
+      bookingWindowDays: item.booking_window_days || 31,
+      availableWeekdays: item.available_weekdays || [0, 1, 2, 3, 4, 5, 6],
+      availableStartTime: item.available_start_time?.slice(0, 5) || '00:00',
+      availableEndTime: item.available_end_time?.slice(0, 5) || '23:59',
     }))
   const displayName = row.profiles?.display_name || fallback?.name || 'Entrenador'
   return {
@@ -248,7 +288,30 @@ const coachFromProfile = (row: CoachProfileRecord, fallback?: Coach): Coach => {
     services,
     videoProvider: row.preferred_video_provider,
     presentationVideoUrl: row.presentation_video_url || undefined,
+    minBookingNoticeMinutes: row.min_booking_notice_minutes ?? 30,
   }
+}
+
+const weekdayLabels = ['L', 'M', 'X', 'J', 'V', 'S', 'D']
+const weekdayNames = ['lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado', 'domingo']
+
+const formatBookingNotice = (minutes = 30) => {
+  if (minutes === 0) return 'sin margen mínimo'
+  if (minutes < 60) return `${minutes} min de antelación`
+  if (minutes % 1440 === 0) return `${minutes / 1440} ${minutes === 1440 ? 'día' : 'días'} de antelación`
+  return `${minutes / 60} h de antelación`
+}
+
+const formatServiceWeekdays = (days: number[] = []) => {
+  if (days.length === 7) return 'Todos los días'
+  if (days.length === 5 && days.every((day, index) => day === index)) return 'De lunes a viernes'
+  return days.map((day) => weekdayNames[day]).filter(Boolean).join(', ')
+}
+
+const formatServiceHours = (startsAt = '00:00', endsAt = '23:59') => {
+  const start = startsAt.slice(0, 5)
+  const end = endsAt.slice(0, 5)
+  return start === '00:00' && end === '23:59' ? 'Según agenda general' : `${start}—${end}`
 }
 
 const startOfWeek = (value: Date) => {
@@ -815,14 +878,18 @@ function Results() {
   const navigate = useNavigate()
   const [search] = useSearchParams()
   const requestedOnline = search.get('mode') === 'Online' || search.get('city')?.startsWith('Cualquier') === true
-  const [items, setItems] = useState<Coach[]>(coaches)
+  const [items, setItems] = useState<Coach[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState('')
+  const [retryKey, setRetryKey] = useState(0)
   const [relaxedFilter, setRelaxedFilter] = useState<string | null>(null)
   const [mode, setMode] = useState<'all' | 'online' | 'presencial'>(requestedOnline ? 'online' : 'all')
   const [sort, setSort] = useState('match')
   const [mapOpen, setMapOpen] = useState(false)
   const category = search.get('category') || 'fitness'
   useEffect(() => {
+    setLoading(true)
+    setLoadError('')
     const rawMode = search.get('mode')
     const rawBudget = search.get('budget')
     const language = search.get('language')
@@ -843,12 +910,14 @@ function Results() {
         setRelaxedFilter(data.relaxed_filter)
       })
       .catch((error) => {
-        setItems(coaches)
+        const message = error instanceof Error ? error.message : 'No pudimos consultar los entrenadores.'
+        setItems([])
         setRelaxedFilter(null)
-        toast.error(error instanceof Error ? `${error.message} Mostramos resultados de demostración.` : 'Mostramos resultados de demostración.')
+        setLoadError(message)
+        toast.error(message)
       })
       .finally(() => setLoading(false))
-  }, [category, requestedOnline, search])
+  }, [category, requestedOnline, search, retryKey])
   const shown = useMemo(() => {
     const filtered = items.filter((coach) => (mode === 'all' || coach.mode === mode || coach.mode === 'hibrido') && (coach.category === category || !items.some((item) => item.category === category)))
     const requestedSubcategory = search.get('subcategory')?.toLocaleLowerCase('es') || ''
@@ -940,8 +1009,9 @@ function Results() {
       <div className={`results-layout ${mapOpen ? 'with-map' : ''}`}>
         <div className="coach-list">
           {loading && <LoadingBlock label="Buscando el mejor encaje" />}
-          {!loading && shown.map((coach, index) => <CoachCard key={coach.id} coach={coach} rank={index + 1} onClick={() => navigate(`/entrenadores/${coach.id}`, { state: { coach } })} />)}
-          {!loading && !shown.length && (
+          {!loading && loadError && <div className="empty-state" role="alert"><Sparkles /><h2>No pudimos cargar los entrenadores.</h2><p>{loadError} No mostramos perfiles de muestra para evitar confundirlos con datos reales.</p><Button onClick={() => setRetryKey((current) => current + 1)}>Reintentar</Button></div>}
+          {!loading && !loadError && shown.map((coach, index) => <CoachCard key={coach.id} coach={coach} rank={index + 1} onClick={() => navigate(`/entrenadores/${coach.id}`, { state: { coach } })} />)}
+          {!loading && !loadError && !shown.length && (
             <div className="empty-state">
               <Sparkles />
               <h2>Podemos abrir un poco la búsqueda.</h2>
@@ -1248,6 +1318,7 @@ function CoachProfile({ onAuth }: { onAuth: () => void }) {
                     <small>
                       {item.detail} · {item.bookingMode === 'request' ? 'requiere aprobación' : 'reserva inmediata'}
                     </small>
+                    {item.availableWeekdays && <small className="service-availability-summary">{formatServiceWeekdays(item.availableWeekdays)} · {formatServiceHours(item.availableStartTime, item.availableEndTime)} · agenda abierta {item.bookingWindowDays || 31} días</small>}
                   </span>
                   <b className="service-price">
                     {item.price} €
@@ -1328,6 +1399,7 @@ function CoachProfile({ onAuth }: { onAuth: () => void }) {
               </span>
             )}
             <small>{selectedService ? `${selectedService.name} · cancelación disponible solo hasta 24 h antes` : 'Añade un servicio para que puedan reservarte'}</small>
+            {selectedService && <small className="public-booking-policy"><Clock3 /> Reserva con {formatBookingNotice(coach.minBookingNoticeMinutes)} · fechas hasta {selectedService.bookingWindowDays || 31} días</small>}
           </div>
           {!preview && selectedService?.offerType === 'flex_pack' && !packageId && (
             <div className="purchase-explainer">
@@ -1714,6 +1786,60 @@ function CancellationDialog({ booking, onClose, onConfirm }: { booking: BookingR
   )
 }
 
+export function BookingDetailsDialog({ booking, perspective, onClose }: { booking: BookingRecord; perspective: 'coach' | 'consumer'; onClose: () => void }) {
+  const startsAt = new Date(booking.starts_at)
+  const endsAt = new Date(booking.ends_at)
+  const duration = booking.coach_services?.duration_minutes || Math.round((endsAt.getTime() - startsAt.getTime()) / 60000)
+  const counterpart = perspective === 'coach'
+    ? booking.profiles?.display_name || 'Cliente CoachConnect'
+    : booking.coach_profiles?.profiles?.display_name || 'Entrenador CoachConnect'
+  const status = ({ pending_payment: 'Pago pendiente', confirmed: 'Confirmada', completed: 'Completada', cancelled: 'Cancelada', disputed: 'En revisión', refunded: 'Reembolsada' } as Record<string, string>)[booking.status] || booking.status
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
+    <section className="booking-detail-dialog" role="dialog" aria-modal="true" aria-labelledby="booking-detail-title">
+      <header>
+        <div><p className="eyebrow">{status}</p><h2 id="booking-detail-title">{booking.coach_services?.name || 'Sesión de entrenamiento'}</h2></div>
+        <button type="button" className="icon-button" onClick={onClose} aria-label="Cerrar"><X /></button>
+      </header>
+      <div className="booking-detail-lead">
+        <CalendarDays />
+        <div><strong>{startsAt.toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</strong><span>{startsAt.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })} — {endsAt.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</span></div>
+      </div>
+      <dl className="booking-detail-grid">
+        <div><dt><UserRound /> {perspective === 'coach' ? 'Cliente' : 'Entrenador'}</dt><dd>{counterpart}</dd></div>
+        <div><dt><Clock3 /> Duración</dt><dd>{duration} minutos</dd></div>
+        <div><dt><CreditCard /> Importe</dt><dd>{booking.amount_cents ? `${(booking.amount_cents / 100).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €` : 'Incluida en bono o plan'}</dd></div>
+        <div><dt><Video /> Modalidad</dt><dd>{booking.coach_services?.mode || booking.meeting_provider || 'Según el servicio'}</dd></div>
+      </dl>
+      <div className="booking-training-detail">
+        <p className="eyebrow">Detalles del entrenamiento</p>
+        <p>{booking.notes || booking.coach_services?.description || 'No hay indicaciones adicionales para esta sesión.'}</p>
+      </div>
+      <footer>
+        {booking.video_url ? <a className="button button-primary button-md" href={booking.video_url} target="_blank" rel="noreferrer"><Video /> Entrar a la videollamada</a> : <span><ShieldCheck /> {booking.coach_services?.mode === 'online' ? 'El enlace aparecerá aquí cuando esté preparado.' : 'Sin enlace de videollamada para esta sesión.'}</span>}
+      </footer>
+    </section>
+  </div>
+}
+
+export function SessionCalendar({ bookings, perspective, onSelect }: { bookings: BookingRecord[]; perspective: 'coach' | 'consumer'; onSelect: (booking: BookingRecord) => void }) {
+  const upcoming = bookings.filter((item) => new Date(item.ends_at).getTime() >= Date.now() && ['pending_payment', 'confirmed'].includes(item.status))
+  const [view, setView] = useState<'week' | 'month'>('week')
+  const [anchor, setAnchor] = useState(() => upcoming[0] ? startOfDay(new Date(upcoming[0].starts_at)) : startOfDay(new Date()))
+  const visibleDays = calendarDaysFor(view, anchor)
+  const move = (direction: number) => setAnchor((current) => view === 'month' ? addMonths(current, direction) : addDays(current, direction * 7))
+  const title = view === 'month'
+    ? anchor.toLocaleDateString('es-ES', { month: 'long', year: 'numeric' })
+    : `${visibleDays[0].toLocaleDateString('es-ES', { day: 'numeric', month: 'short' })} — ${visibleDays[6].toLocaleDateString('es-ES', { day: 'numeric', month: 'short' })}`
+  return <section className={`week-calendar account-calendar calendar-${view}`} aria-label="Calendario de próximas clases">
+    <header><div><p className="eyebrow">Próximas clases</p><h3>{title}</h3></div><div className="calendar-toolbar"><div className="calendar-view-tabs" role="group" aria-label="Visualización del calendario"><button type="button" className={view === 'week' ? 'active' : ''} aria-pressed={view === 'week'} onClick={() => setView('week')}>Semana</button><button type="button" className={view === 'month' ? 'active' : ''} aria-pressed={view === 'month'} onClick={() => setView('month')}>Mes</button></div><div className="calendar-controls"><button type="button" aria-label="Periodo anterior" onClick={() => move(-1)}><ChevronLeft /></button><button type="button" onClick={() => setAnchor(startOfDay(new Date()))}>Hoy</button><button type="button" aria-label="Periodo siguiente" onClick={() => move(1)}><ChevronRight /></button></div></div></header>
+    <div className="week-grid">{visibleDays.map((date) => {
+      const dayBookings = upcoming.filter((item) => new Date(item.starts_at).toDateString() === date.toDateString())
+      const counterpart = (item: BookingRecord) => perspective === 'coach' ? item.profiles?.display_name || 'Cliente' : item.coach_profiles?.profiles?.display_name || 'Entrenador'
+      return <article className={`${date.toDateString() === new Date().toDateString() ? 'today' : ''} ${view === 'month' && date.getMonth() !== anchor.getMonth() ? 'outside-month' : ''}`} key={date.toISOString()}><div className="week-day-head"><span>{date.toLocaleDateString('es-ES', { weekday: 'short' }).replace('.', '')}</span><strong>{date.getDate()}</strong></div><div className="week-events">{dayBookings.map((item) => <button type="button" className={`calendar-event status-${item.status.replaceAll('_', '-')}`} key={item.id} onClick={() => onSelect(item)} aria-label={`Ver detalles de ${item.coach_services?.name || 'la sesión'} con ${counterpart(item)}`}><time>{new Date(item.starts_at).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</time><strong>{item.coach_services?.name || 'Sesión'}</strong><span>{counterpart(item)}</span></button>)}{!dayBookings.length && <span className="calendar-empty">Sin clases</span>}</div></article>
+    })}</div>
+  </section>
+}
+
 function ProfileAvatar({ profile, className = '' }: { profile: Pick<Profile, 'display_name' | 'avatar_url'>; className?: string }) {
   return <span className={`account-avatar ${className}`}>{profile.avatar_url ? <img src={profile.avatar_url} alt={`Foto de ${profile.display_name}`} /> : profile.display_name.slice(0, 2).toUpperCase()}</span>
 }
@@ -1820,6 +1946,7 @@ export function Account({ onAuth }: { onAuth: () => void }) {
   const [activeReview, setActiveReview] = useState<BookingRecord | null>(null)
   const [activeOutcome, setActiveOutcome] = useState<BookingRecord | null>(null)
   const [activeCancellation, setActiveCancellation] = useState<BookingRecord | null>(null)
+  const [activeBookingDetails, setActiveBookingDetails] = useState<BookingRecord | null>(null)
   const [loadedUserId, setLoadedUserId] = useState<string | null>(null)
   const [clock, setClock] = useState(() => Date.now())
   const local = useMemo(() => JSON.parse(localStorage.getItem('coachconnect-demo-bookings') || '[]') as LocalBooking[], [])
@@ -1827,7 +1954,7 @@ export function Account({ onAuth }: { onAuth: () => void }) {
     if (!user) return
     const [nextProfile, nextRemote, nextPackages] = await Promise.all([
       api<Profile>('/api/v1/me').catch(() => null),
-      api<any[]>('/api/v1/bookings').catch(() => []),
+      api<any[]>('/api/v1/bookings?perspective=consumer').catch(() => []),
       api<any[]>('/api/v1/packages').catch(() => []),
     ])
     setProfile(nextProfile)
@@ -1840,7 +1967,7 @@ export function Account({ onAuth }: { onAuth: () => void }) {
     let current = true
     Promise.all([
       api<Profile>('/api/v1/me').catch(() => null),
-      api<any[]>('/api/v1/bookings').catch(() => []),
+      api<any[]>('/api/v1/bookings?perspective=consumer').catch(() => []),
       api<any[]>('/api/v1/packages').catch(() => []),
     ]).then(([nextProfile, nextRemote, nextPackages]) => {
       if (!current) return
@@ -1892,6 +2019,7 @@ export function Account({ onAuth }: { onAuth: () => void }) {
       </div>
       <AccountNavigation active="profile" />
       {profile && <AccountIdentity profile={profile} userId={user.id} onSaved={setProfile} />}
+      {profile?.role === 'coach' && <div className="booking-perspective-note"><UserRound /><span><strong>Estas son tus reservas como cliente.</strong> Las sesiones que impartes están separadas en el <Link to="/profesional">panel profesional</Link>.</span></div>}
       {packages.some((item) => item.status === 'active' && item.offer_type !== 'recurring_plan' && (item.session_credits?.some((credit: any) => credit.status === 'available') || item.used_sessions < item.total_sessions)) && (
         <a className="package-reminder" href="#mis-bonos">
           <CreditCard />
@@ -1899,6 +2027,7 @@ export function Account({ onAuth }: { onAuth: () => void }) {
           <ArrowRight />
         </a>
       )}
+      {remote.length > 0 && <SessionCalendar bookings={remote} perspective="consumer" onSelect={setActiveBookingDetails} />}
       <section className="booking-list">
         <div className="section-title">
           <h2>Sesiones</h2>
@@ -1977,7 +2106,7 @@ export function Account({ onAuth }: { onAuth: () => void }) {
               </div>
               <div>
                 <p className="eyebrow">{statusLabel}</p>
-                <h3>{profile?.role === 'coach' ? item.profiles?.display_name || 'Cliente CoachConnect' : item.coach_profiles?.profiles?.display_name || 'Entrenador CoachConnect'}</h3>
+                <h3>{item.coach_profiles?.profiles?.display_name || 'Entrenador CoachConnect'}</h3>
                 <span>
                   {item.coach_services?.name}
                   {item.outcome_finalized_at && item.outcome_status ? ` · ${item.outcome_status.replaceAll('_', ' ')}` : ''}
@@ -2054,9 +2183,10 @@ export function Account({ onAuth }: { onAuth: () => void }) {
           })}
         </section>
       )}
-      {activeReview && <ReviewDialog booking={activeReview} isCoach={profile?.role === 'coach'} onClose={() => setActiveReview(null)} onSaved={refresh} />}
+      {activeReview && <ReviewDialog booking={activeReview} isCoach={false} onClose={() => setActiveReview(null)} onSaved={refresh} />}
       {activeOutcome && <OutcomeDialog booking={activeOutcome} onClose={() => setActiveOutcome(null)} onSaved={refresh} />}
       {activeCancellation && <CancellationDialog booking={activeCancellation} onClose={() => setActiveCancellation(null)} onConfirm={(reason) => cancelBooking(activeCancellation.id, reason)} />}
+      {activeBookingDetails && <BookingDetailsDialog booking={activeBookingDetails} perspective="consumer" onClose={() => setActiveBookingDetails(null)} />}
     </section>
   )
 }
@@ -2064,17 +2194,21 @@ export function Account({ onAuth }: { onAuth: () => void }) {
 function Messages({ onAuth }: { onAuth: () => void }) {
   const { user, loading } = useAuth()
   const [search, setSearch] = useSearchParams()
-  const [conversations, setConversations] = useState<any[]>([])
+  const [conversations, setConversations] = useState<ConversationRecord[]>([])
+  const [blockedUsers, setBlockedUsers] = useState<BlockedUserRecord[]>([])
   const [active, setActive] = useState<string | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [body, setBody] = useState('')
   const [busy, setBusy] = useState(false)
   const [loadError, setLoadError] = useState('')
+  const [showBlocked, setShowBlocked] = useState(false)
+  const [reportContext, setReportContext] = useState<{ messageId?: string } | null>(null)
   useEffect(() => {
     if (!user) return
-    api<any[]>('/api/v1/conversations')
-      .then((rows) => {
+    Promise.all([api<ConversationRecord[]>('/api/v1/conversations'), api<BlockedUserRecord[]>('/api/v1/blocks')])
+      .then(([rows, blocks]) => {
         setConversations(rows)
+        setBlockedUsers(blocks)
         const requested = search.get('conversation')
         setActive(rows.find((item) => item.id === requested)?.id || rows[0]?.id || null)
         setLoadError('')
@@ -2147,9 +2281,10 @@ function Messages({ onAuth }: { onAuth: () => void }) {
   }
   const activeConversation = conversations.find((item) => item.id === active)
   const activeOther = activeConversation ? (activeConversation.consumer_id === user.id ? activeConversation.coach : activeConversation.consumer) : null
+  const messagingUnavailable = Boolean(activeConversation?.blocked_by_me || activeConversation?.blocked_me)
   const attach = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
-    if (!file || !active) return
+    if (!file || !active || messagingUnavailable) return
     const path = `${active}/${user.id}/${crypto.randomUUID()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, '-')}`
     const { error } = await supabase.storage.from('chat-files').upload(path, file)
     if (error) return toast.error(error.message)
@@ -2168,33 +2303,178 @@ function Messages({ onAuth }: { onAuth: () => void }) {
     if (error) return toast.error(error.message)
     window.open(data.signedUrl, '_blank', 'noopener,noreferrer')
   }
-  const reportConversation = async () => {
-    if (!active) return
-    const reason = window.prompt('Motivo de la denuncia')
-    if (!reason) return
+  const submitReport = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!active || !activeOther?.id || busy) return
+    const form = new FormData(event.currentTarget)
+    const reason = String(form.get('reason') || '')
+    const details = String(form.get('details') || '')
+    const blockAfter = form.get('block_after') === 'on'
+    setBusy(true)
     try {
       await api('/api/v1/reports', {
         method: 'POST',
-        body: JSON.stringify({ conversation_id: active, reason }),
+        body: JSON.stringify({
+          conversation_id: active,
+          message_id: reportContext?.messageId || null,
+          reported_user_id: activeOther.id,
+          reason,
+          details,
+        }),
       })
+      if (blockAfter && !activeConversation?.blocked_by_me) {
+        const block = await api<BlockedUserRecord>('/api/v1/blocks', {
+          method: 'POST',
+          body: JSON.stringify({ user_id: activeOther.id }),
+        })
+        setBlockedUsers((items) => [block, ...items.filter((item) => item.blocked_id !== block.blocked_id)])
+        setConversations((items) => items.map((item) => (item.id === active ? { ...item, blocked_by_me: true } : item)))
+      }
+      setReportContext(null)
       toast.success('Denuncia enviada al equipo')
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'No se pudo denunciar')
+    } finally {
+      setBusy(false)
     }
   }
   const blockActiveUser = async () => {
-    if (!activeOther?.id) return
+    if (!activeOther?.id || !active || busy) return
+    setBusy(true)
     try {
-      await api('/api/v1/blocks', {
+      const row = await api<BlockedUserRecord>('/api/v1/blocks', {
         method: 'POST',
         body: JSON.stringify({ user_id: activeOther.id }),
       })
-      toast.success('Usuario bloqueado')
+      setBlockedUsers((items) => [row, ...items.filter((item) => item.blocked_id !== row.blocked_id)])
+      setConversations((items) => items.map((item) => (item.id === active ? { ...item, blocked_by_me: true } : item)))
+      toast.success('Usuario bloqueado. Ya no puede enviarte mensajes.')
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'No se pudo bloquear')
+    } finally {
+      setBusy(false)
     }
   }
-  return <section className="messages-screen"><div className="messages-head"><p className="eyebrow">Mensajería privada</p><h1>Tus conversaciones.</h1></div><AccountNavigation active="messages" />{loadError && <p className="inbox-error" role="alert">{loadError}</p>}<div className="inbox"><aside>{conversations.map((item) => { const other = item.consumer_id === user.id ? item.coach : item.consumer; return <button className={active === item.id ? 'active' : ''} key={item.id} onClick={() => chooseConversation(item.id)}><span className="avatar">{(other?.display_name || 'CC').slice(0, 2).toUpperCase()}</span><span><strong>{other?.display_name || 'CoachConnect'}</strong><small>Conversación segura</small></span></button> })}{!conversations.length && <p>Aún no tienes conversaciones.</p>}</aside><div className="conversation">{active && <div className="conversation-actions"><strong>{activeOther?.display_name || 'CoachConnect'}</strong><button className="text-button" onClick={reportConversation}>Denunciar</button><button className="text-button" onClick={blockActiveUser}>Bloquear</button></div>}<div className="chat-messages">{messages.map((item) => <div className={`message ${item.sender_id === user.id ? 'outgoing' : 'incoming'} ${item.delivery_status === 'sending' ? 'sending' : ''}`} key={item.id}>{item.body}{item.attachment_path && <button className="attachment-link" onClick={() => openAttachment(item.attachment_path || '')}><Paperclip /> Abrir archivo</button>}<small>{item.delivery_status === 'sending' ? 'Enviando…' : new Date(item.created_at).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</small></div>)}</div>{active && <form className="chat-composer" onSubmit={send}><label className="attachment-button" aria-label="Adjuntar archivo"><Paperclip /><input type="file" accept=".pdf,image/jpeg,image/png,image/webp" onChange={attach} /></label><input aria-label="Mensaje" value={body} onChange={(event) => setBody(event.target.value)} placeholder="Escribe un mensaje…" disabled={busy} /><button type="submit" aria-label="Enviar" disabled={busy || !body.trim()}>{busy ? <LoaderCircle className="spin" /> : <Send />}</button></form>}</div></div></section>
+  const unblockUser = async (blockedUserId: string) => {
+    if (busy) return
+    setBusy(true)
+    try {
+      await api(`/api/v1/blocks/${blockedUserId}`, { method: 'DELETE' })
+      setBlockedUsers((items) => items.filter((item) => item.blocked_id !== blockedUserId))
+      setConversations((items) =>
+        items.map((item) => {
+          const otherId = item.consumer_id === user.id ? item.coach_id : item.consumer_id
+          return otherId === blockedUserId ? { ...item, blocked_by_me: false } : item
+        }),
+      )
+      toast.success('Usuario desbloqueado')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'No se pudo desbloquear')
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <section className="messages-screen">
+      <div className="messages-head">
+        <div>
+          <p className="eyebrow">Mensajería privada</p>
+          <h1>Tus conversaciones.</h1>
+        </div>
+        <button className={`blocked-users-toggle ${showBlocked ? 'active' : ''}`} onClick={() => setShowBlocked((value) => !value)} aria-expanded={showBlocked}>
+          <UserRoundX />
+          <span>Usuarios bloqueados</span>
+          <strong>{blockedUsers.length}</strong>
+        </button>
+      </div>
+      <AccountNavigation active="messages" />
+      {loadError && <p className="inbox-error" role="alert">{loadError}</p>}
+      {showBlocked && (
+        <section className="blocked-users-panel" aria-label="Usuarios bloqueados">
+          <header>
+            <div><p className="eyebrow">Tu privacidad</p><h2>Usuarios bloqueados</h2></div>
+            <button className="icon-button" onClick={() => setShowBlocked(false)} aria-label="Cerrar usuarios bloqueados"><X /></button>
+          </header>
+          <div>
+            {blockedUsers.map((item) => (
+              <article key={item.blocked_id}>
+                <span className="avatar">{(item.profile?.display_name || 'CC').slice(0, 2).toUpperCase()}</span>
+                <div><strong>{item.profile?.display_name || 'Usuario de CoachConnect'}</strong><small>Bloqueado el {new Date(item.created_at).toLocaleDateString('es-ES')}</small></div>
+                <button onClick={() => unblockUser(item.blocked_id)} disabled={busy}><Unlock /> Desbloquear</button>
+              </article>
+            ))}
+            {!blockedUsers.length && <Empty title="No has bloqueado a nadie." copy="Cuando bloquees a una persona desde un chat, podrás administrarla aquí." />}
+          </div>
+        </section>
+      )}
+      <div className="inbox">
+        <aside>
+          <div className="inbox-list-label"><span>Conversaciones</span><strong>{conversations.length}</strong></div>
+          {conversations.map((item) => {
+            const other = item.consumer_id === user.id ? item.coach : item.consumer
+            return (
+              <button className={active === item.id ? 'active' : ''} key={item.id} onClick={() => chooseConversation(item.id)}>
+                <span className="avatar">{(other?.display_name || 'CC').slice(0, 2).toUpperCase()}</span>
+                <span><strong>{other?.display_name || 'CoachConnect'}</strong><small>{item.blocked_by_me ? 'Bloqueado por ti' : item.blocked_me ? 'Mensajería no disponible' : 'Conversación segura'}</small></span>
+                {(item.blocked_by_me || item.blocked_me) && <Ban className="conversation-blocked-icon" />}
+              </button>
+            )
+          })}
+          {!conversations.length && <p>Aún no tienes conversaciones.</p>}
+        </aside>
+        <div className="conversation">
+          {active ? (
+            <>
+              <div className="conversation-actions">
+                <div><span className="avatar">{(activeOther?.display_name || 'CC').slice(0, 2).toUpperCase()}</span><span><strong>{activeOther?.display_name || 'CoachConnect'}</strong><small>{activeOther?.role === 'coach' ? 'Entrenador' : 'Cliente'} · chat privado</small></span></div>
+                <div>
+                  <button className="chat-action report" onClick={() => setReportContext({})}><Flag /> Denunciar</button>
+                  {activeConversation?.blocked_by_me ? (
+                    <button className="chat-action" onClick={() => activeOther?.id && unblockUser(activeOther.id)} disabled={busy}><Unlock /> Desbloquear</button>
+                  ) : (
+                    <button className="chat-action danger" onClick={blockActiveUser} disabled={busy}><Ban /> Bloquear</button>
+                  )}
+                </div>
+              </div>
+              {messagingUnavailable && (
+                <div className="chat-restriction-banner"><MessageSquareOff /><div><strong>Mensajería detenida</strong><span>{activeConversation?.blocked_by_me ? 'Has bloqueado a esta persona. Desbloquéala para volver a conversar.' : 'No es posible intercambiar mensajes con esta persona.'}</span></div></div>
+              )}
+              <div className="chat-messages">
+                {messages.map((item) => (
+                  <div className={`message ${item.sender_id === user.id ? 'outgoing' : 'incoming'} ${item.delivery_status === 'sending' ? 'sending' : ''}`} key={item.id}>
+                    {item.body}
+                    {item.attachment_path && <button className="attachment-link" onClick={() => openAttachment(item.attachment_path || '')}><Paperclip /> Abrir archivo</button>}
+                    <small>{item.delivery_status === 'sending' ? 'Enviando…' : new Date(item.created_at).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</small>
+                    {item.sender_id !== user.id && <button className="message-report-button" onClick={() => setReportContext({ messageId: item.id })} aria-label="Denunciar este mensaje"><Flag /></button>}
+                  </div>
+                ))}
+              </div>
+              <form className={`chat-composer ${messagingUnavailable ? 'disabled' : ''}`} onSubmit={send}>
+                <label className="attachment-button" aria-label="Adjuntar archivo"><Paperclip /><input type="file" accept=".pdf,image/jpeg,image/png,image/webp" onChange={attach} disabled={messagingUnavailable || busy} /></label>
+                <input aria-label="Mensaje" value={body} onChange={(event) => setBody(event.target.value)} placeholder={messagingUnavailable ? 'Desbloquea al usuario para escribir' : 'Escribe un mensaje…'} disabled={busy || messagingUnavailable} />
+                <button type="submit" aria-label="Enviar" disabled={busy || messagingUnavailable || !body.trim()}>{busy ? <LoaderCircle className="spin" /> : <Send />}</button>
+              </form>
+            </>
+          ) : <Empty title="Elige una conversación." copy="Tus mensajes aparecerán aquí." />}
+        </div>
+      </div>
+      {reportContext && (
+        <div className="dialog-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setReportContext(null)}>
+          <form className="report-dialog" role="dialog" aria-modal="true" aria-labelledby="report-title" onSubmit={submitReport}>
+            <header><span><ShieldAlert /></span><button type="button" className="icon-button" onClick={() => setReportContext(null)} aria-label="Cerrar denuncia"><X /></button></header>
+            <p className="eyebrow">Seguridad CoachConnect</p>
+            <h2 id="report-title">Denunciar a {activeOther?.display_name || 'este usuario'}</h2>
+            <p>El equipo de operaciones revisará el contexto de la conversación. La otra persona no sabrá quién realizó la denuncia.</p>
+            {reportContext.messageId && <div className="reported-message-note"><Flag /> Se adjuntará el mensaje seleccionado como evidencia.</div>}
+            <label>Motivo<select name="reason" required defaultValue=""><option value="" disabled>Selecciona un motivo</option><option>Acoso o comportamiento abusivo</option><option>Contenido inapropiado</option><option>Fraude o intento de estafa</option><option>Riesgo para la seguridad</option><option>Suplantación de identidad</option><option>Otro motivo</option></select></label>
+            <label>Cuéntanos qué ha ocurrido<textarea name="details" maxLength={1200} rows={4} placeholder="Añade detalles que ayuden al equipo a revisar el caso…" /></label>
+            {!activeConversation?.blocked_by_me && <label className="report-block-option"><input type="checkbox" name="block_after" /><span><strong>Bloquear también a esta persona</strong><small>No podréis enviaros más mensajes hasta que la desbloquees.</small></span></label>}
+            <footer><button type="button" className="text-button" onClick={() => setReportContext(null)}>Cancelar</button><Button type="submit" disabled={busy}>{busy ? 'Enviando…' : 'Enviar denuncia'}</Button></footer>
+          </form>
+        </div>
+      )}
+    </section>
+  )
 }
 
 function Notifications({ onAuth }: { onAuth: () => void }) {
@@ -2275,7 +2555,7 @@ export function ProPortal({ onAuth }: { onAuth: () => void }) {
       api<Profile>('/api/v1/me').catch(() => null),
       api<CoachProfileRecord & { availability_rules?: any[]; stripe_account_id?: string | null }>('/api/v1/coach/profile').catch(() => null),
       api<CoachServiceRecord[]>('/api/v1/coach/services').catch(() => []),
-      api<BookingRecord[]>('/api/v1/bookings').catch(() => []),
+      api<BookingRecord[]>('/api/v1/bookings?perspective=coach').catch(() => []),
     ]).then(([nextProfile, coachProfile, services, bookings]) => {
       if (!current) return
       setProfile(nextProfile)
@@ -2595,6 +2875,10 @@ function ServicesForm() {
   const [loadError, setLoadError] = useState('')
   const [offerType, setOfferType] = useState<'single' | 'flex_pack' | 'recurring_plan'>('single')
   const [recurringScheduleMode, setRecurringScheduleMode] = useState<'fixed' | 'flexible'>('fixed')
+  const [availableWeekdays, setAvailableWeekdays] = useState<number[]>([0, 1, 2, 3, 4, 5, 6])
+  const [availableStartTime, setAvailableStartTime] = useState('09:00')
+  const [availableEndTime, setAvailableEndTime] = useState('19:00')
+  const [bookingWindowDays, setBookingWindowDays] = useState(60)
   useEffect(() => {
     api<CoachServiceRecord[]>('/api/v1/coach/services')
       .then((items) => {
@@ -2618,6 +2902,8 @@ function ServicesForm() {
     event.preventDefault()
     const formElement = event.currentTarget
     const form = new FormData(formElement)
+    if (!availableWeekdays.length) return toast.error('Elige al menos un día para ofrecer este servicio.')
+    if (availableEndTime <= availableStartTime) return toast.error('La hora final del servicio debe ser posterior a la inicial.')
     const packageSize = offerType === 'single' ? 1 : Number(form.get('package_size'))
     const cadenceWeeks = offerType === 'recurring_plan' && recurringScheduleMode === 'fixed' ? Number(form.get('cadence_weeks')) : null
     const expiryDays = offerType === 'single'
@@ -2637,6 +2923,10 @@ function ServicesForm() {
       package_size: packageSize,
       expiry_days: expiryDays,
       cadence_weeks: cadenceWeeks,
+      booking_window_days: Number(form.get('booking_window_days')),
+      available_weekdays: availableWeekdays,
+      available_start_time: availableStartTime,
+      available_end_time: availableEndTime,
       ...(offerType === 'recurring_plan' ? { recurring_schedule_mode: recurringScheduleMode } : {}),
     }
     setBusy(true)
@@ -2670,12 +2960,20 @@ function ServicesForm() {
     setEditing(item)
     setOfferType(item.offer_type || (item.package_size > 1 ? 'flex_pack' : 'single'))
     setRecurringScheduleMode(item.recurring_schedule_mode || 'fixed')
+    setAvailableWeekdays(item.available_weekdays || [0, 1, 2, 3, 4, 5, 6])
+    setAvailableStartTime(item.available_start_time?.slice(0, 5) || '00:00')
+    setAvailableEndTime(item.available_end_time?.slice(0, 5) || '23:59')
+    setBookingWindowDays(item.booking_window_days || 31)
     setFormOpen(true)
   }
   const create = () => {
     setEditing(null)
     setOfferType('single')
     setRecurringScheduleMode('fixed')
+    setAvailableWeekdays([0, 1, 2, 3, 4, 5, 6])
+    setAvailableStartTime('09:00')
+    setAvailableEndTime('19:00')
+    setBookingWindowDays(60)
     setFormOpen(true)
   }
   if (!loaded) return <LoadingBlock label="Cargando tus servicios" />
@@ -2700,7 +2998,8 @@ function ServicesForm() {
       )}
       {formOpen && (
         <div className="service-editor">
-          <ProForm key={editing?.id || 'new-service'} title={editing ? 'Editar oferta' : 'Nueva oferta'} intro="Las condiciones se guardan en cada compra y no cambian retroactivamente." onSubmit={submit}>
+          <ProForm key={editing?.id || 'new-service'} title={editing ? 'Editar servicio' : 'Nuevo servicio'} intro="Define primero la experiencia y después sus reglas de reserva. Las compras existentes no cambiarán." onSubmit={submit}>
+            <div className="service-form-section wide"><span>01</span><div><strong>Modelo de venta</strong><small>Sesión suelta, bono o plan con varias fechas.</small></div></div>
             <label>
               Tipo de oferta
               <select name="offer_type" value={offerType} onChange={(event) => setOfferType(event.target.value as typeof offerType)}>
@@ -2716,6 +3015,7 @@ function ServicesForm() {
                 <option value="request">Solicitud con aprobación</option>
               </select>
             </label>
+            <div className="service-form-section wide"><span>02</span><div><strong>Contenido y precio</strong><small>Lo que verá el cliente al comparar tus opciones.</small></div></div>
             <label>
               Especialidad
               <select name="category_id" required defaultValue={editing?.category_id || ''}>
@@ -2730,6 +3030,10 @@ function ServicesForm() {
             <label>
               Nombre
               <input name="name" required minLength={3} defaultValue={editing?.name || ''} placeholder="Plan semanal de fuerza" />
+            </label>
+            <label className="wide">
+              Descripción
+              <textarea name="description" rows={3} maxLength={500} defaultValue={editing?.description || ''} placeholder="Objetivo, nivel, lugar y qué debe preparar el cliente." />
             </label>
             <label>
               Modalidad
@@ -2780,10 +3084,25 @@ function ServicesForm() {
                 </label>}
               </>
             )}
-            <label className="wide">
-              Descripción
-              <textarea name="description" rows={3} maxLength={500} defaultValue={editing?.description || ''} placeholder="Objetivo, nivel, lugar y qué debe preparar el cliente." />
+            <div className="service-form-section wide"><span>03</span><div><strong>Reglas de agenda</strong><small>Limita los días y hasta qué fecha pueden elegir los clientes.</small></div></div>
+            <fieldset className="service-weekdays wide">
+              <legend>Días en que ofreces este servicio</legend>
+              <div>{weekdayLabels.map((label, index) => <button type="button" key={label} className={availableWeekdays.includes(index) ? 'active' : ''} aria-pressed={availableWeekdays.includes(index)} onClick={() => setAvailableWeekdays((current) => current.includes(index) ? current.filter((day) => day !== index) : [...current, index].sort())}><span>{label}</span><small>{weekdayNames[index]}</small><Check /></button>)}</div>
+              <small>Estos días deben estar también activos en tu Agenda general.</small>
+            </fieldset>
+            <div className="time-range service-time-range wide">
+              <label>Disponible desde<input aria-label="Hora inicial del servicio" type="time" value={availableStartTime} onChange={(event) => setAvailableStartTime(event.target.value)} required /></label>
+              <label>Disponible hasta<input aria-label="Hora final del servicio" type="time" value={availableEndTime} onChange={(event) => setAvailableEndTime(event.target.value)} required /></label>
+              <small>Esta franja se cruza con tu horario general; el cliente solo verá las horas que cumplan ambos.</small>
+            </div>
+            <label>
+              Hasta cuándo se puede reservar
+              <select name="booking_window_days" value={bookingWindowDays} onChange={(event) => setBookingWindowDays(Number(event.target.value))}>
+                <option value="14">2 semanas</option><option value="31">1 mes</option><option value="60">2 meses</option><option value="90">3 meses</option><option value="180">6 meses</option><option value="365">1 año</option>
+              </select>
+              <small>El calendario del cliente mostrará huecos hasta este límite.</small>
             </label>
+            <div className="service-policy-preview"><Clock3 /><span><strong>{formatServiceWeekdays(availableWeekdays) || 'Elige los días'} · {availableStartTime}—{availableEndTime}</strong><small>Reserva disponible durante los próximos {bookingWindowDays} días.</small></span></div>
             <div className="form-actions">
               <Button type="submit" disabled={busy}>
                 {busy && <LoaderCircle className="spin" />} {editing ? 'Guardar cambios' : 'Crear oferta'}
@@ -2820,6 +3139,9 @@ function ServicesForm() {
                 <div className="service-facts">
                   <span>{item.duration_minutes} min</span>
                   <span>{item.expiry_days ? `${item.expiry_days} días` : item.mode}</span>
+                  <span>{formatServiceWeekdays(item.available_weekdays || [0, 1, 2, 3, 4, 5, 6])}</span>
+                  <span>{formatServiceHours(item.available_start_time, item.available_end_time)}</span>
+                  <span>Hasta {item.booking_window_days || 31} días</span>
                   <strong>
                     {(item.price_cents / 100).toLocaleString('es-ES', {
                       style: 'currency',
@@ -2848,30 +3170,36 @@ function ServicesForm() {
 
 function AvailabilityForm() {
   const days = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
-  const [active, setActive] = useState<number[]>([0, 1, 2, 3, 4])
-  const [startsAt, setStartsAt] = useState('09:00')
-  const [endsAt, setEndsAt] = useState('19:00')
+  const [schedule, setSchedule] = useState(() => days.map((_, weekday) => ({
+    weekday,
+    enabled: weekday < 5,
+    startsAt: '09:00',
+    endsAt: '19:00',
+  })))
   const [exceptions, setExceptions] = useState<any[]>([])
   const [respondsNow, setRespondsNow] = useState(false)
+  const [minBookingNotice, setMinBookingNotice] = useState(30)
   const [calendarView, setCalendarView] = useState<CalendarView>('week')
   const [calendarDate, setCalendarDate] = useState(() => startOfDay(new Date()))
   const [calendarBookings, setCalendarBookings] = useState<BookingRecord[]>([])
   const [calendarExceptions, setCalendarExceptions] = useState<any[]>([])
   const [calendarLoading, setCalendarLoading] = useState(true)
   const [calendarError, setCalendarError] = useState('')
+  const [selectedBooking, setSelectedBooking] = useState<BookingRecord | null>(null)
   useEffect(() => {
     api<{ rules: any[]; exceptions: any[] }>('/api/v1/coach/availability')
       .then((data) => {
         if (data.rules.length) {
-          setActive(data.rules.map((item) => item.weekday))
-          setStartsAt(data.rules[0].starts_at.slice(0, 5))
-          setEndsAt(data.rules[0].ends_at.slice(0, 5))
+          setSchedule((current) => current.map((day) => {
+            const rule = data.rules.find((item) => item.weekday === day.weekday)
+            return rule ? { ...day, enabled: true, startsAt: rule.starts_at.slice(0, 5), endsAt: rule.ends_at.slice(0, 5) } : { ...day, enabled: false }
+          }))
         }
         setExceptions(data.exceptions)
       })
       .catch(() => undefined)
     api<any>('/api/v1/coach/profile')
-      .then((profile) => setRespondsNow(profile.responds_now))
+      .then((profile) => { setRespondsNow(profile.responds_now); setMinBookingNotice(profile.min_booking_notice_minutes ?? 30) })
       .catch(() => undefined)
   }, [])
   useEffect(() => {
@@ -2884,8 +3212,19 @@ function AvailabilityForm() {
       .catch((error) => setCalendarError(error instanceof Error ? error.message : 'No pudimos cargar el calendario'))
       .finally(() => setCalendarLoading(false))
   }, [calendarDate, calendarView])
-  const save = async () => { const rules = active.map((weekday) => ({ weekday, starts_at: startsAt, ends_at: endsAt, timezone: 'Europe/Madrid' })); try { await api('/api/v1/coach/availability', { method: 'PUT', body: JSON.stringify(rules) }); toast.success('Disponibilidad actualizada') } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo guardar') } }
-  const addException = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const formElement = event.currentTarget; const form = new FormData(formElement); try { const item = await api<any>('/api/v1/coach/availability/exceptions', { method: 'POST', body: JSON.stringify({ starts_at: new Date(String(form.get('starts_at'))).toISOString(), ends_at: new Date(String(form.get('ends_at'))).toISOString(), available: false, label: form.get('label') }) }); setExceptions((current) => [...current, item]); setCalendarExceptions((current) => [...current, item]); formElement.reset(); toast.success('Bloqueo añadido') } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo añadir') } }
+  const save = async () => {
+    const invalidDay = schedule.find((day) => day.enabled && day.endsAt <= day.startsAt)
+    if (invalidDay) return toast.error(`La hora final del ${days[invalidDay.weekday].toLowerCase()} debe ser posterior a la inicial.`)
+    const rules = schedule.filter((day) => day.enabled).map((day) => ({ weekday: day.weekday, starts_at: day.startsAt, ends_at: day.endsAt, timezone: 'Europe/Madrid' }))
+    try {
+      await Promise.all([
+        api('/api/v1/coach/availability', { method: 'PUT', body: JSON.stringify(rules) }),
+        api('/api/v1/coach/booking-settings', { method: 'PATCH', body: JSON.stringify({ min_booking_notice_minutes: minBookingNotice }) }),
+      ])
+      toast.success('Disponibilidad y condiciones actualizadas')
+    } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo guardar') }
+  }
+  const addException = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const formElement = event.currentTarget; const form = new FormData(formElement); const available = form.get('kind') === 'available'; try { const item = await api<any>('/api/v1/coach/availability/exceptions', { method: 'POST', body: JSON.stringify({ starts_at: new Date(String(form.get('starts_at'))).toISOString(), ends_at: new Date(String(form.get('ends_at'))).toISOString(), available, label: form.get('label') }) }); setExceptions((current) => [...current, item]); setCalendarExceptions((current) => [...current, item]); formElement.reset(); toast.success(available ? 'Disponibilidad puntual añadida' : 'Bloqueo añadido') } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo añadir') } }
   const removeException = async (id: string) => { try { await api(`/api/v1/coach/availability/exceptions/${id}`, { method: 'DELETE' }); setExceptions((current) => current.filter((item) => item.id !== id)); setCalendarExceptions((current) => current.filter((item) => item.id !== id)); toast.success('Bloqueo eliminado') } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo eliminar') } }
   const toggleRespondsNow = async () => { const enabled = !respondsNow; try { await api('/api/v1/coach/responds-now', { method: 'PATCH', body: JSON.stringify({ enabled }) }); setRespondsNow(enabled) } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo actualizar') } }
   const visibleDays = calendarDaysFor(calendarView, calendarDate)
@@ -2904,14 +3243,15 @@ function AvailabilityForm() {
       {calendarError && <p className="form-error" role="alert">{calendarError}</p>}
       {calendarLoading ? <LoadingBlock label="Cargando el calendario" /> : <div className="week-grid">{visibleDays.map((date) => {
         const dayBookings = calendarBookings.filter((item) => new Date(item.starts_at).toDateString() === date.toDateString())
-        const dayBlocks = calendarExceptions.filter((item) => new Date(item.starts_at).toDateString() === date.toDateString())
+        const dayExceptions = calendarExceptions.filter((item) => new Date(item.starts_at).toDateString() === date.toDateString())
         const today = date.toDateString() === new Date().toDateString()
         const outsideMonth = calendarView === 'month' && date.getMonth() !== calendarDate.getMonth()
-        return <article className={`${today ? 'today' : ''} ${outsideMonth ? 'outside-month' : ''}`} key={date.toISOString()}><div className="week-day-head"><span>{date.toLocaleDateString('es-ES', { weekday: 'short' }).replace('.', '')}</span><strong>{date.getDate()}</strong></div><div className="week-events">{dayBookings.map((item) => <div className={`calendar-event status-${item.status.replaceAll('_', '-')}`} key={item.id}><time>{new Date(item.starts_at).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</time><strong>{item.coach_services?.name || 'Sesión'}</strong><span>{item.profiles?.display_name || 'Cliente'}</span><small>{statusLabel[item.status] || item.status}</small></div>)}{dayBlocks.map((item) => <div className="calendar-event blocked" key={item.id}><time>{new Date(item.starts_at).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</time><strong>{item.label || 'Bloqueo'}</strong><small>No disponible</small></div>)}{!dayBookings.length && !dayBlocks.length && <span className="calendar-empty">Sin sesiones</span>}</div></article>
+        return <article className={`${today ? 'today' : ''} ${outsideMonth ? 'outside-month' : ''}`} key={date.toISOString()}><div className="week-day-head"><span>{date.toLocaleDateString('es-ES', { weekday: 'short' }).replace('.', '')}</span><strong>{date.getDate()}</strong></div><div className="week-events">{dayBookings.map((item) => <button type="button" className={`calendar-event status-${item.status.replaceAll('_', '-')}`} key={item.id} onClick={() => setSelectedBooking(item)} aria-label={`Ver detalles de ${item.coach_services?.name || 'la sesión'} con ${item.profiles?.display_name || 'el cliente'}`}><time>{new Date(item.starts_at).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</time><strong>{item.coach_services?.name || 'Sesión'}</strong><span>{item.profiles?.display_name || 'Cliente'}</span><small>{statusLabel[item.status] || item.status}</small></button>)}{dayExceptions.map((item) => <div className={`calendar-event ${item.available ? 'available-extra' : 'blocked'}`} key={item.id}><time>{new Date(item.starts_at).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</time><strong>{item.label || (item.available ? 'Disponibilidad puntual' : 'Bloqueo')}</strong><small>{item.available ? 'Disponible extra' : 'No disponible'}</small></div>)}{!dayBookings.length && !dayExceptions.length && <span className="calendar-empty">Sin sesiones</span>}</div></article>
       })}</div>}
     </section>
-    <section className="availability-settings"><div><p className="eyebrow">Horario recurrente</p><h3>Cuándo pueden reservarte</h3><p>Activa tus días habituales y define una franja. Los bloqueos siempre tienen prioridad.</p></div><div className="time-range"><label>Desde<input type="time" value={startsAt} onChange={(event) => setStartsAt(event.target.value)} /></label><label>Hasta<input type="time" value={endsAt} onChange={(event) => setEndsAt(event.target.value)} /></label></div><div className="day-grid">{days.map((day, index) => <button type="button" className={active.includes(index) ? 'active' : ''} onClick={() => setActive((items) => items.includes(index) ? items.filter((item) => item !== index) : [...items, index])} key={day}><span>{day.slice(0, 3)}</span><strong>{startsAt}—{endsAt}</strong><Check /></button>)}</div><Button onClick={save}>Guardar disponibilidad</Button></section>
-    <form className="exception-form" onSubmit={addException}><h3>Vacaciones y bloqueos</h3><label>Desde<input name="starts_at" type="datetime-local" required /></label><label>Hasta<input name="ends_at" type="datetime-local" required /></label><label>Motivo<input name="label" placeholder="Vacaciones" /></label><Button type="submit">Añadir bloqueo</Button></form><div className="compact-list exception-list">{exceptions.map((item) => <div key={item.id}><div><strong>{item.label || 'Bloqueo'}</strong><span>{new Date(item.starts_at).toLocaleString('es-ES')} — {new Date(item.ends_at).toLocaleString('es-ES')}</span></div><button className="danger-action" onClick={() => removeException(item.id)}>Eliminar</button></div>)}</div>
+    <section className="availability-settings"><div><p className="eyebrow">Horario recurrente</p><h3>Cuándo pueden reservarte</h3><p>Activa tus días habituales y define una franja distinta para cada uno. El horario de cada servicio se cruzará con esta agenda general.</p></div><div className="booking-policy-setting"><div><Clock3 /><span><strong>Margen mínimo de reserva</strong><small>Se mostrará en tu perfil y se aplicará a todos tus servicios.</small></span></div><select aria-label="Margen mínimo de reserva" value={minBookingNotice} onChange={(event) => setMinBookingNotice(Number(event.target.value))}><option value="0">Sin margen mínimo</option><option value="30">30 minutos</option><option value="60">1 hora</option><option value="120">2 horas</option><option value="360">6 horas</option><option value="720">12 horas</option><option value="1440">1 día</option><option value="2880">2 días</option><option value="10080">1 semana</option></select></div><div className="availability-day-list">{schedule.map((item) => <div className={item.enabled ? 'availability-day-row active' : 'availability-day-row'} key={item.weekday}><button type="button" className="availability-day-toggle" aria-pressed={item.enabled} onClick={() => setSchedule((current) => current.map((day) => day.weekday === item.weekday ? { ...day, enabled: !day.enabled } : day))}><span>{days[item.weekday]}</span><Check /></button><label>Desde<input aria-label={`Desde el ${days[item.weekday].toLowerCase()}`} type="time" value={item.startsAt} disabled={!item.enabled} onChange={(event) => setSchedule((current) => current.map((day) => day.weekday === item.weekday ? { ...day, startsAt: event.target.value } : day))} /></label><label>Hasta<input aria-label={`Hasta el ${days[item.weekday].toLowerCase()}`} type="time" value={item.endsAt} disabled={!item.enabled} onChange={(event) => setSchedule((current) => current.map((day) => day.weekday === item.weekday ? { ...day, endsAt: event.target.value } : day))} /></label></div>)}</div><Button onClick={save}>Guardar disponibilidad</Button></section>
+    <form className="exception-form" onSubmit={addException}><div><p className="eyebrow">Fechas concretas</p><h3>Días sueltos y bloqueos</h3><p>Añade horas extra fuera de tu rutina o marca vacaciones y ausencias.</p></div><label>Tipo<select name="kind" defaultValue="available"><option value="available">Disponibilidad puntual</option><option value="blocked">Bloqueo / no disponible</option></select></label><label>Desde<input name="starts_at" type="datetime-local" required /></label><label>Hasta<input name="ends_at" type="datetime-local" required /></label><label>Motivo<input name="label" placeholder="Clase especial, vacaciones…" /></label><Button type="submit">Añadir fecha</Button></form><div className="compact-list exception-list">{exceptions.map((item) => <div key={item.id}><div><strong>{item.label || (item.available ? 'Disponibilidad puntual' : 'Bloqueo')}</strong><span>{item.available ? 'Disponible' : 'No disponible'} · {new Date(item.starts_at).toLocaleString('es-ES')} — {new Date(item.ends_at).toLocaleString('es-ES')}</span></div><button className="danger-action" onClick={() => removeException(item.id)}>Eliminar</button></div>)}</div>
+    {selectedBooking && <BookingDetailsDialog booking={selectedBooking} perspective="coach" onClose={() => setSelectedBooking(null)} />}
   </section>
 }
 
@@ -3194,6 +3534,8 @@ function Admin() {
   const [docs, setDocs] = useState<any[]>([])
   const [videos, setVideos] = useState<any[]>([])
   const [reports, setReports] = useState<any[]>([])
+  const [sanctions, setSanctions] = useState<ModerationSanction[]>([])
+  const [reportNotes, setReportNotes] = useState<Record<string, string>>({})
   const [sessionDisputes, setSessionDisputes] = useState<any[]>([])
   const [catalog, setCatalog] = useState<any[]>([])
   const [bookings, setBookings] = useState<any[]>([])
@@ -3211,7 +3553,7 @@ function Admin() {
       .then((item) => {
         setProfile(item)
         if (item.role !== 'admin') return
-        void Promise.all([api<any[]>('/api/v1/admin/credentials').then(setDocs), api<any[]>('/api/v1/admin/videos').then(setVideos), api<any[]>('/api/v1/admin/reports').then(setReports), api<any[]>('/api/v1/admin/session-disputes').then(setSessionDisputes), api<any[]>('/api/v1/admin/categories').then(setCatalog), api<any[]>('/api/v1/admin/bookings').then(setBookings), api<any[]>('/api/v1/admin/payments').then(setPayments), api<AdminUser[]>('/api/v1/admin/users').then(setUsers)]).catch((error) => setAdminError(error instanceof Error ? error.message : 'No se pudo cargar el panel'))
+        void Promise.all([api<any[]>('/api/v1/admin/credentials').then(setDocs), api<any[]>('/api/v1/admin/videos').then(setVideos), api<any[]>('/api/v1/admin/reports').then(setReports), api<ModerationSanction[]>('/api/v1/admin/sanctions').then(setSanctions), api<any[]>('/api/v1/admin/session-disputes').then(setSessionDisputes), api<any[]>('/api/v1/admin/categories').then(setCatalog), api<any[]>('/api/v1/admin/bookings').then(setBookings), api<any[]>('/api/v1/admin/payments').then(setPayments), api<AdminUser[]>('/api/v1/admin/users').then(setUsers)]).catch((error) => setAdminError(error instanceof Error ? error.message : 'No se pudo cargar el panel'))
       })
       .catch(() => undefined)
   }, [user])
@@ -3294,11 +3636,52 @@ function Admin() {
       toast.error(error instanceof Error ? error.message : 'No se pudo cambiar el acceso')
     }
   }
-  const resolveReport = async (id: string) => {
-    await api(`/api/v1/admin/reports/${id}?status_value=resolved`, {
-      method: 'PATCH',
-    })
-    setReports((items) => items.filter((item) => item.id !== id))
+  const updateReport = async (id: string, status: 'reviewing' | 'resolved' | 'dismissed') => {
+    try {
+      const row = await api<any>(`/api/v1/admin/reports/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status, resolution_note: reportNotes[id] || '' }),
+      })
+      setReports((items) => items.map((item) => (item.id === id ? { ...item, ...row } : item)))
+      toast.success(status === 'resolved' ? 'Denuncia resuelta' : status === 'dismissed' ? 'Denuncia descartada' : 'Denuncia en revisión')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'No se pudo actualizar la denuncia')
+    }
+  }
+  const createSanction = async (event: FormEvent<HTMLFormElement>, report: any) => {
+    event.preventDefault()
+    if (!report.reported_user_id) return
+    const form = new FormData(event.currentTarget)
+    try {
+      const row = await api<ModerationSanction>('/api/v1/admin/sanctions', {
+        method: 'POST',
+        body: JSON.stringify({
+          user_id: report.reported_user_id,
+          report_id: report.id,
+          kind: form.get('kind'),
+          duration_hours: Number(form.get('duration_hours')),
+          reason: form.get('reason'),
+        }),
+      })
+      setSanctions((items) => [row, ...items])
+      setReports((items) => items.map((item) => (item.id === report.id ? { ...item, status: 'reviewing', sanctions: [row, ...(item.sanctions || [])] } : item)))
+      toast.success('Medida temporal aplicada')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'No se pudo aplicar la medida')
+    }
+  }
+  const revokeSanction = async (id: string) => {
+    try {
+      const row = await api<ModerationSanction>(`/api/v1/admin/sanctions/${id}/revoke`, {
+        method: 'PATCH',
+        body: JSON.stringify({ reason: 'Revocada manualmente desde el panel de moderación' }),
+      })
+      setSanctions((items) => items.map((item) => (item.id === id ? { ...item, ...row } : item)))
+      setReports((items) => items.map((item) => ({ ...item, sanctions: (item.sanctions || []).map((sanction: ModerationSanction) => (sanction.id === id ? { ...sanction, ...row } : sanction)) })))
+      toast.success('Restricción retirada')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'No se pudo retirar la restricción')
+    }
   }
   const resolveSessionDispute = async (id: string, outcome: string) => {
     try {
@@ -3345,6 +3728,12 @@ function Admin() {
     rejected: 'Rechazado',
     suspended: 'Suspendido',
   }
+  const sanctionLabels: Record<ModerationSanction['kind'], string> = {
+    account: 'Cuenta suspendida',
+    messaging: 'Sin mensajería',
+    training: 'Sin entrenamientos',
+  }
+  const activeSanctions = sanctions.filter((item) => !item.revoked_at && new Date(item.expires_at) > new Date())
   return (
     <section className="admin-screen">
       <p className="eyebrow">CoachConnect Ops</p>
@@ -3469,6 +3858,7 @@ function Admin() {
                   <span className={`role-badge role-${item.role}`}>{item.role === 'coach' ? 'Entrenador' : item.role === 'admin' ? 'Administrador' : 'Cliente'}</span>
                   <span className={`access-badge ${item.access_enabled ? 'active' : 'revoked'}`}>{item.access_enabled ? 'Acceso activo' : 'Acceso revocado'}</span>
                   {item.coach && <span className={`status-pill status-${item.coach.verification_status}`}>{verificationLabels[item.coach.verification_status] || item.coach.verification_status}</span>}
+                  {(item.active_sanctions || []).map((sanction) => <span className={`sanction-badge kind-${sanction.kind}`} key={sanction.id}>{sanctionLabels[sanction.kind]}</span>)}
                 </div>
                 <div className="admin-user-actions">
                   {item.coach && <button onClick={() => setCoachStatus(item.id, item.coach?.verification_status === 'verified' ? 'suspended' : 'verified', item.coach?.verification_status === 'verified' ? 'Validez retirada por administración' : 'Validez concedida por administración')}>{item.coach.verification_status === 'verified' ? 'Retirar validez' : 'Dar validez'}</button>}
@@ -3483,21 +3873,64 @@ function Admin() {
         </>
       )}
       {tab === 'moderation' && (
-        <div className="admin-list">
-          {reports.map((item) => (
-            <article key={item.id}>
-              <ShieldCheck />
+        <div className="moderation-workspace">
+          <div className="moderation-summary">
+            <div><span><Flag /></span><strong>{reports.filter((item) => item.status === 'open').length}</strong><small>Denuncias nuevas</small></div>
+            <div><span><ShieldAlert /></span><strong>{reports.filter((item) => item.status === 'reviewing').length}</strong><small>En revisión</small></div>
+            <div><span><Ban /></span><strong>{activeSanctions.length}</strong><small>Medidas activas</small></div>
+          </div>
+          <div className="moderation-layout">
+            <div className="report-queue">
+              <header><div><p className="eyebrow">Bandeja de seguridad</p><h2>Denuncias de usuarios</h2></div><span>{reports.length} casos</span></header>
+              {reports.map((item) => (
+                <article className={`moderation-report status-${item.status}`} key={item.id}>
+                  <header>
+                    <div className="report-identities">
+                      <span className="avatar">{(item.reporter?.display_name || 'CC').slice(0, 2).toUpperCase()}</span>
+                      <div><small>Denuncia de</small><strong>{item.reporter?.display_name || 'Usuario'}</strong></div>
+                      <ArrowRight />
+                      <span className="avatar reported">{(item.reported_user?.display_name || 'CC').slice(0, 2).toUpperCase()}</span>
+                      <div><small>Usuario denunciado</small><strong>{item.reported_user?.display_name || 'Usuario no disponible'}</strong></div>
+                    </div>
+                    <span className={`report-status ${item.status}`}>{item.status === 'open' ? 'Nueva' : item.status === 'reviewing' ? 'En revisión' : item.status === 'resolved' ? 'Resuelta' : 'Descartada'}</span>
+                  </header>
+                  <div className="report-body">
+                    <div className="report-reason"><Flag /><div><small>Motivo</small><strong>{item.reason}</strong><p>{item.details || 'La persona no añadió más detalles.'}</p></div></div>
+                    {item.message && <blockquote><small>Mensaje señalado · {new Date(item.message.created_at).toLocaleString('es-ES')}</small><p>“{item.message.body}”</p></blockquote>}
+                    <small className="report-date">Recibida el {new Date(item.created_at).toLocaleString('es-ES')}</small>
+                  </div>
+                  {(item.sanctions || []).length > 0 && <div className="report-measures">{item.sanctions.map((sanction: ModerationSanction) => <span className={sanction.revoked_at ? 'revoked' : ''} key={sanction.id}><ShieldCheck /> {sanctionLabels[sanction.kind]} · hasta {new Date(sanction.expires_at).toLocaleDateString('es-ES')}</span>)}</div>}
+                  {item.reported_user_id && ['open', 'reviewing'].includes(item.status) && (
+                    <form className="sanction-form" onSubmit={(event) => createSanction(event, item)}>
+                      <div><p className="eyebrow">Aplicar medida manual</p><strong>Restringir temporalmente</strong></div>
+                      <label>Medida<select name="kind" defaultValue="messaging"><option value="messaging">Bloquear mensajes</option><option value="training">Bloquear entrenamientos</option><option value="account">Suspender cuenta</option></select></label>
+                      <label>Duración<select name="duration_hours" defaultValue="168"><option value="24">24 horas</option><option value="72">3 días</option><option value="168">7 días</option><option value="720">30 días</option><option value="2160">90 días</option></select></label>
+                      <label className="sanction-reason">Justificación<input name="reason" minLength={3} maxLength={500} required defaultValue={`Denuncia: ${item.reason}`} /></label>
+                      <Button type="submit">Aplicar medida</Button>
+                    </form>
+                  )}
+                  <div className="report-resolution">
+                    <label>Nota interna<textarea value={reportNotes[item.id] ?? item.resolution_note ?? ''} onChange={(event) => setReportNotes((notes) => ({ ...notes, [item.id]: event.target.value }))} rows={2} maxLength={1200} placeholder="Conclusión de la revisión, evidencias o criterio aplicado…" /></label>
+                    <div><button onClick={() => updateReport(item.id, 'reviewing')}>Marcar en revisión</button><button onClick={() => updateReport(item.id, 'dismissed')}>Descartar</button><button className="primary-action" onClick={() => updateReport(item.id, 'resolved')}>Resolver caso</button></div>
+                  </div>
+                </article>
+              ))}
+              {!reports.length && <Empty title="No hay denuncias." copy="Los nuevos avisos enviados desde los chats aparecerán aquí con todo su contexto." />}
+            </div>
+            <aside className="active-sanctions-panel">
+              <header><p className="eyebrow">Control activo</p><h2>Medidas vigentes</h2><span>{activeSanctions.length}</span></header>
               <div>
-                <strong>{item.reason}</strong>
-                <span>
-                  {item.details || 'Sin detalle'} · {item.status}
-                </span>
+                {activeSanctions.map((item) => (
+                  <article key={item.id}>
+                    <span className={`sanction-icon kind-${item.kind}`}>{item.kind === 'account' ? <UserRoundX /> : item.kind === 'messaging' ? <MessageSquareOff /> : <Dumbbell />}</span>
+                    <div><strong>{item.profile?.display_name || 'Usuario'}</strong><span>{sanctionLabels[item.kind]}</span><small>Hasta {new Date(item.expires_at).toLocaleString('es-ES')}</small><p>{item.reason}</p></div>
+                    <button onClick={() => revokeSanction(item.id)}><Unlock /> Retirar</button>
+                  </article>
+                ))}
+                {!activeSanctions.length && <p className="sanctions-empty"><ShieldCheck /> No hay restricciones temporales activas.</p>}
               </div>
-              <div>
-                <button onClick={() => resolveReport(item.id)}>Resolver</button>
-              </div>
-            </article>
-          ))}
+            </aside>
+          </div>
         </div>
       )}
       {tab === 'sessions' && (

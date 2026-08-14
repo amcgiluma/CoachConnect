@@ -50,4 +50,9 @@ async def current_user(authorization: str | None = Header(default=None)) -> Auth
         logger.warning("Supabase rechazó la validación de sesión (%s, %s)", response.status_code, error_code)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sesión no válida o caducada")
     payload = response.json()
+    # Supabase Auth bans prevent future refreshes, while this database check
+    # also closes the window of an access token that was already issued.
+    from .services import assert_user_capability
+
+    await assert_user_capability(payload["id"], "account")
     return AuthUser(id=payload["id"], email=payload.get("email"))

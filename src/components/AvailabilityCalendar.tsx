@@ -57,11 +57,6 @@ export function AvailabilityCalendar({ slots, value, values, selectionLimit, onC
   const [selectedDay, setSelectedDay] = useState('')
   const [view, setView] = useState<'week' | 'month'>('week')
   const [periodAnchor, setPeriodAnchor] = useState<Date>(() => new Date())
-  const activeDayKey = days.some((day) => day.key === selectedDay)
-    ? selectedDay
-    : days.some((day) => day.key === selectedValueDay) ? selectedValueDay : days[0]?.key || ''
-  const activeDay = days.find((day) => day.key === activeDayKey)
-
   useEffect(() => {
     if (days.length && !days.some((day) => day.key === selectedDay)) {
       setSelectedDay(days[0].key)
@@ -80,6 +75,10 @@ export function AvailabilityCalendar({ slots, value, values, selectionLimit, onC
   const weekStart = startOfWeek(periodAnchor)
   const visibleWeekKeys = new Set(Array.from({ length: 7 }, (_, index) => dateKey(addDays(weekStart, index))))
   const visibleDays = view === 'week' ? days.filter((day) => visibleWeekKeys.has(day.key)) : days.filter((day) => day.date.getMonth() === periodAnchor.getMonth() && day.date.getFullYear() === periodAnchor.getFullYear())
+  const activeDay = visibleDays.find((day) => day.key === selectedDay)
+    || visibleDays.find((day) => day.key === selectedValueDay)
+    || visibleDays[0]
+  const activeDayKey = activeDay?.key || ''
   const monthStart = new Date(periodAnchor.getFullYear(), periodAnchor.getMonth(), 1)
   const monthEnd = new Date(periodAnchor.getFullYear(), periodAnchor.getMonth() + 1, 0)
   const monthCells = Array.from({ length: ((monthStart.getDay() + 6) % 7) + monthEnd.getDate() }, (_, index) => {
@@ -91,12 +90,26 @@ export function AvailabilityCalendar({ slots, value, values, selectionLimit, onC
   const periodLabel = view === 'month'
     ? periodAnchor.toLocaleDateString('es-ES', { month: 'long', year: 'numeric' })
     : `${weekStart.toLocaleDateString('es-ES', { day: 'numeric', month: 'short' })} — ${addDays(weekStart, 6).toLocaleDateString('es-ES', { day: 'numeric', month: 'short' })}`
-  const movePeriod = (direction: number) => setPeriodAnchor((current) => {
-    const next = new Date(current)
+  const movePeriod = (direction: number) => {
+    const next = new Date(periodAnchor)
     if (view === 'month') next.setMonth(next.getMonth() + direction, 1)
     else next.setDate(next.getDate() + direction * 7)
-    return next
-  })
+    const nextWeekStart = startOfWeek(next)
+    const nextWeekKeys = new Set(Array.from({ length: 7 }, (_, index) => dateKey(addDays(nextWeekStart, index))))
+    const nextDays = view === 'month'
+      ? days.filter((day) => day.date.getMonth() === next.getMonth() && day.date.getFullYear() === next.getFullYear())
+      : days.filter((day) => nextWeekKeys.has(day.key))
+    setPeriodAnchor(next)
+    setSelectedDay(nextDays[0]?.key || '')
+  }
+  const changeView = (nextView: 'week' | 'month') => {
+    if (nextView === view) return
+    if (activeDay) {
+      setSelectedDay(activeDay.key)
+      setPeriodAnchor(activeDay.date)
+    }
+    setView(nextView)
+  }
   const chooseDay = (key: string, date: Date, available: boolean) => {
     if (!available) return
     setSelectedDay(key)
@@ -108,8 +121,8 @@ export function AvailabilityCalendar({ slots, value, values, selectionLimit, onC
     <div className="availability-calendar-head">
       <span><CalendarDays /> {periodLabel}</span>
       <div className="calendar-view-controls">
-        <button type="button" className={view === 'week' ? 'active' : ''} aria-pressed={view === 'week'} onClick={() => setView('week')}>Semana</button>
-        <button type="button" className={view === 'month' ? 'active' : ''} aria-pressed={view === 'month'} onClick={() => setView('month')}>Mes</button>
+        <button type="button" className={view === 'week' ? 'active' : ''} aria-pressed={view === 'week'} onClick={() => changeView('week')}>Semana</button>
+        <button type="button" className={view === 'month' ? 'active' : ''} aria-pressed={view === 'month'} onClick={() => changeView('month')}>Mes</button>
         <button type="button" aria-label="Periodo anterior" onClick={() => movePeriod(-1)}><ChevronLeft /></button>
         <button type="button" aria-label="Periodo siguiente" onClick={() => movePeriod(1)}><ChevronRight /></button>
       </div>

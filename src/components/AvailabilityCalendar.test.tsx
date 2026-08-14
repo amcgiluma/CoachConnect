@@ -43,6 +43,36 @@ describe('AvailabilityCalendar', () => {
     expect(screen.getByRole('button', { name: /^4 de agosto: 0 huecos$/i })).toBeDisabled()
   })
 
+  it('moves the active date with the visible week', () => {
+    const separatedWeeks = [
+      { starts_at: '2026-08-03T08:00:00+02:00', ends_at: '2026-08-03T09:00:00+02:00' },
+      { starts_at: '2026-08-10T12:30:00+02:00', ends_at: '2026-08-10T13:30:00+02:00' },
+    ]
+    render(<AvailabilityCalendar slots={separatedWeeks} value="" onChange={vi.fn()} />)
+
+    expect(screen.getByRole('button', { name: '08:00' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Periodo siguiente' }))
+
+    expect(screen.queryByRole('button', { name: '08:00' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '12:30' })).toBeInTheDocument()
+  })
+
+  it('keeps the first available day in focus when changing from month to week', () => {
+    const differentMonths = [
+      { starts_at: '2026-08-20T08:00:00+02:00', ends_at: '2026-08-20T09:00:00+02:00' },
+      { starts_at: '2026-09-03T17:30:00+02:00', ends_at: '2026-09-03T18:30:00+02:00' },
+    ]
+    render(<AvailabilityCalendar slots={differentMonths} value="" onChange={vi.fn()} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Mes' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Periodo siguiente' }))
+    expect(screen.getByRole('button', { name: '17:30' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Semana' }))
+    expect(screen.getByRole('button', { name: /jue 3 1/i })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('button', { name: '17:30' })).toBeInTheDocument()
+  })
+
   it('supports selecting several dates for a flexible plan', () => {
     const onChange = vi.fn()
     render(<AvailabilityCalendar slots={slots} value="" values={[slots[0].starts_at]} selectionLimit={3} onChange={onChange} />)

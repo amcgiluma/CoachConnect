@@ -4,7 +4,8 @@ export type Category = { id: string; label: string; kicker: string; examples: st
 export type CoachService = {
   id?: string; name: string; detail: string; price: number; duration?: number; packageSize?: number
   offerType?: 'single' | 'flex_pack' | 'recurring_plan'; bookingMode?: 'instant' | 'request'; recurringScheduleMode?: 'fixed' | 'flexible'
-  expiryDays?: number | null; cadenceWeeks?: number | null
+  expiryDays?: number | null; cadenceWeeks?: number | null; bookingWindowDays?: number; availableWeekdays?: number[]
+  availableStartTime?: string; availableEndTime?: string
 }
 export type Coach = {
   id: string; name: string; initials: string; specialty: string; category: string; mode: Mode; city: string
@@ -13,6 +14,7 @@ export type Coach = {
   avatarUrl?: string; avatarAvifUrl?: string
   videoProvider?: 'meet' | 'zoom' | 'custom'
   presentationVideoUrl?: string
+  minBookingNoticeMinutes?: number
 }
 
 export const categories: Category[] = [

@@ -50,7 +50,7 @@ describe('profile loading transitions', () => {
 
     await resolveRequest('/api/v1/me', { id: 'coach-1', display_name: 'Marta Entrenadora', role: 'coach', email: 'correo@example.com', city: 'Madrid' })
     expect(screen.getByText('Preparando tu espacio')).toBeInTheDocument()
-    await resolveRequest('/api/v1/bookings', [])
+    await resolveRequest('/api/v1/bookings?perspective=consumer', [])
     await resolveRequest('/api/v1/packages', [])
 
     expect(await screen.findByRole('heading', { name: 'Hola, Marta Entrenadora.' })).toBeInTheDocument()
@@ -67,7 +67,7 @@ describe('profile loading transitions', () => {
     expect(screen.getByText('Preparando tu espacio')).toBeInTheDocument()
     await resolveRequest('/api/v1/coach/profile', { user_id: 'coach-1', headline: 'Fuerza', bio: 'Entrenamiento funcional', city: 'Madrid', mode: 'hibrido', verification_status: 'verified', responds_now: true, rating: 5, review_count: 1, availability_rules: [{}] })
     await resolveRequest('/api/v1/coach/services', [{ id: 'service-1' }])
-    await resolveRequest('/api/v1/bookings', [])
+    await resolveRequest('/api/v1/bookings?perspective=coach', [])
 
     expect(await screen.findByRole('heading', { name: /tu trabajo/i })).toBeInTheDocument()
     expect(screen.getByText('Marta Entrenadora')).toBeInTheDocument()

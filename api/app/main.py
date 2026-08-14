@@ -6,7 +6,7 @@ from datetime import datetime, time as datetime_time, timedelta, timezone
 import logging
 import re
 import unicodedata
-from typing import Any
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 import stripe
@@ -19,9 +19,13 @@ from .dependencies import close_auth_client, current_user
 from .schemas import (
     AuthUser,
     AdminOutcomeResolutionRequest,
+    AdminReportUpdateRequest,
+    AdminSanctionCreateRequest,
+    AdminSanctionRevokeRequest,
     AvailabilityExceptionRequest,
     AvailabilityRuleRequest,
     BlockUserRequest,
+    BookingSettingsRequest,
     BookingDecisionRequest,
     CancellationRequest,
     Category,
@@ -56,7 +60,9 @@ from .schemas import (
 from .seed import CATEGORIES, COACHES
 from .services import (
     auth_admin_list_users,
+    auth_admin_set_user_ban_duration,
     auth_admin_set_user_access,
+    assert_user_capability,
     cancel_payment_intent,
     capture_payment_intent,
     create_checkout,
@@ -69,10 +75,17 @@ from .services import (
     refund_destination_payment,
     storage_signed_url,
     stripe_account_status,
+    validate_booking_schedule,
 )
 
 
 logger = logging.getLogger(__name__)
+
+SANCTION_DETAILS_FOR_USER = {
+    "account": "el acceso a la cuenta",
+    "messaging": "el uso de la mensajería",
+    "training": "la participación en nuevos entrenamientos",
+}
 
 
 @asynccontextmanager
@@ -146,21 +159,16 @@ async def assert_admin(user_id: str) -> None:
 async def list_categories() -> list[Category]:
     if not db.ready:
         return CATEGORIES
-    try:
-        rows = await db.select("categories", active="eq.true", order="sort_order.asc")
-        parents = [row for row in rows if row["parent_id"] is None]
-        children: dict[str, list[str]] = {}
-        for row in rows:
-            if row["parent_id"]:
-                children.setdefault(row["parent_id"], []).append(row["name_es"])
-        return [
-            Category(id=row["slug"], name=row["name_es"], name_en=row["name_en"], subcategories=children.get(row["id"], []))
-            for row in parents
-        ]
-    except HTTPException:
-        if settings.demo_mode and settings.environment in {"development", "test", "testing"}:
-            return CATEGORIES
-        raise
+    rows = await db.select("categories", active="eq.true", order="sort_order.asc")
+    parents = [row for row in rows if row["parent_id"] is None]
+    children: dict[str, list[str]] = {}
+    for row in rows:
+        if row["parent_id"]:
+            children.setdefault(row["parent_id"], []).append(row["name_es"])
+    return [
+        Category(id=row["slug"], name=row["name_es"], name_en=row["name_en"], subcategories=children.get(row["id"], []))
+        for row in parents
+    ]
 
 
 def rank_coaches(
@@ -234,10 +242,11 @@ def rank_coaches(
 
 
 PUBLIC_COACH_SELECT = (
-    "user_id,headline,bio,city,mode,verification_status,responds_now,rating,review_count,"
+    "user_id,headline,bio,city,mode,verification_status,responds_now,rating,review_count,min_booking_notice_minutes,"
     "languages,preferred_video_provider,profiles(display_name,avatar_url),"
     "coach_services(id,category_id,name,description,mode,duration_minutes,price_cents,package_size,active,"
     "offer_type,booking_mode,expiry_days,cadence_weeks,acceptance_window_hours,"
+    "booking_window_days,available_weekdays,available_start_time,available_end_time,"
     "categories(id,slug,name_es,parent_id))"
 )
 
@@ -253,61 +262,54 @@ async def remote_coaches(requested_category: str | None = None) -> list[CoachSum
         if settings.demo_mode and settings.environment in {"development", "test", "testing"}:
             return COACHES
         raise HTTPException(503, "La base de datos no está configurada")
-    try:
-        rows = await db.select(
-            "coach_profiles",
-            select=PUBLIC_COACH_SELECT,
-            verification_status="eq.verified",
-        )
-        category_rows = await db.select("categories", select="id,slug,parent_id", active="eq.true")
-        categories_by_id = {item["id"]: item for item in category_rows}
+    rows = await db.select(
+        "coach_profiles",
+        select=PUBLIC_COACH_SELECT,
+        verification_status="eq.verified",
+    )
+    category_rows = await db.select("categories", select="id,slug,parent_id", active="eq.true")
+    categories_by_id = {item["id"]: item for item in category_rows}
 
-        def root_category_slug(service: dict[str, Any]) -> str:
-            category = service.get("categories") or {}
-            parent = categories_by_id.get(category.get("parent_id"))
-            return (parent or category).get("slug", "fitness")
+    def root_category_slug(service: dict[str, Any]) -> str:
+        category = service.get("categories") or {}
+        parent = categories_by_id.get(category.get("parent_id"))
+        return (parent or category).get("slug", "fitness")
 
-        result: list[CoachSummary] = []
-        for row in rows:
-            services = [item for item in row.get("coach_services", []) if item.get("active")]
-            if not services:
-                continue
-            compatible_services = [item for item in services if root_category_slug(item) == requested_category]
-            primary = min(compatible_services or services, key=lambda item: item["price_cents"])
-            specialty_values = list(dict.fromkeys(
-                value
-                for service in (compatible_services or services)
-                for value in (
-                    service.get("name"), service.get("description"),
-                    (service.get("categories") or {}).get("name_es"),
-                    (service.get("categories") or {}).get("slug"),
-                )
-                if value
-            ))
-            result.append(CoachSummary(
-                id=row["user_id"],
-                name=(row.get("profiles") or {}).get("display_name", "Entrenador CoachConnect"),
-                avatar_url=(row.get("profiles") or {}).get("avatar_url"),
-                specialty=row["headline"] or primary["name"],
-                category=root_category_slug(primary),
-                mode=row["mode"],
-                city=row.get("city") or "Online",
-                rating=float(row["rating"]),
-                reviews=row["review_count"],
-                price_from=primary["price_cents"] / 100,
-                next_slot="Consulta su agenda",
-                responds_now=row["responds_now"],
-                verified=row["verification_status"] == "verified",
-                languages=row.get("languages") or ["es"],
-                specialties=specialty_values,
-            ))
-        if result:
-            return result
-        return COACHES if settings.demo_mode and settings.environment in {"development", "test", "testing"} else []
-    except HTTPException:
-        if settings.demo_mode and settings.environment in {"development", "test", "testing"}:
-            return COACHES
-        raise
+    result: list[CoachSummary] = []
+    for row in rows:
+        services = [item for item in row.get("coach_services", []) if item.get("active")]
+        if not services:
+            continue
+        compatible_services = [item for item in services if root_category_slug(item) == requested_category]
+        primary = min(compatible_services or services, key=lambda item: item["price_cents"])
+        specialty_values = list(dict.fromkeys(
+            value
+            for service in (compatible_services or services)
+            for value in (
+                service.get("name"), service.get("description"),
+                (service.get("categories") or {}).get("name_es"),
+                (service.get("categories") or {}).get("slug"),
+            )
+            if value
+        ))
+        result.append(CoachSummary(
+            id=row["user_id"],
+            name=(row.get("profiles") or {}).get("display_name", "Entrenador CoachConnect"),
+            avatar_url=(row.get("profiles") or {}).get("avatar_url"),
+            specialty=row["headline"] or primary["name"],
+            category=root_category_slug(primary),
+            mode=row["mode"],
+            city=row.get("city") or "Online",
+            rating=float(row["rating"]),
+            reviews=row["review_count"],
+            price_from=primary["price_cents"] / 100,
+            next_slot="Consulta su agenda",
+            responds_now=row["responds_now"],
+            verified=row["verification_status"] == "verified",
+            languages=row.get("languages") or ["es"],
+            specialties=specialty_values,
+        ))
+    return result
 
 
 @app.post("/api/v1/matching/search", response_model=MatchResponse, tags=["matching"])
@@ -335,6 +337,8 @@ async def coach_detail(coach_id: str) -> dict[str, Any]:
                 else None
             )
             return row
+    if db.ready:
+        raise HTTPException(404, "Entrenador no encontrado")
     demo = next((coach for coach in COACHES if coach.id == coach_id), None)
     if not demo:
         raise HTTPException(404, "Entrenador no encontrado")
@@ -342,17 +346,22 @@ async def coach_detail(coach_id: str) -> dict[str, Any]:
 
 
 @app.get("/api/v1/coaches/{coach_id}/slots", tags=["catalog"])
-async def coach_slots(coach_id: str, service_id: str, days: int = Query(default=31, ge=1, le=62)) -> dict[str, Any]:
+async def coach_slots(coach_id: str, service_id: str, days: int | None = Query(default=None, ge=1, le=365)) -> dict[str, Any]:
     services = await db.select("coach_services", id=f"eq.{service_id}", coach_id=f"eq.{coach_id}", active="eq.true")
     if not services:
         raise HTTPException(404, "Servicio no encontrado")
     service = services[0]
+    service_horizon_days = int(service.get("booking_window_days") or 31)
+    requested_days = min(days or service_horizon_days, service_horizon_days)
+    service_weekdays = set(service.get("available_weekdays") or range(7))
+    service_start_time = datetime_time.fromisoformat(service.get("available_start_time") or "00:00")
+    service_end_time = datetime_time.fromisoformat(service.get("available_end_time") or "23:59:59")
     duration = timedelta(minutes=service["duration_minutes"])
     now = datetime.now(timezone.utc)
-    anchor_horizon = now + timedelta(days=days)
-    series_span_days = (int(service.get("package_size") or 1) - 1) * int(service.get("cadence_weeks") or 1) * 7
-    horizon = anchor_horizon + timedelta(days=series_span_days)
+    anchor_horizon = now + timedelta(days=requested_days)
+    horizon = anchor_horizon
     rules = await db.select("availability_rules", coach_id=f"eq.{coach_id}")
+    coach_profiles = await db.select("coach_profiles", select="min_booking_notice_minutes", user_id=f"eq.{coach_id}")
     exceptions = await db.select(
         "availability_exceptions",
         coach_id=f"eq.{coach_id}",
@@ -375,26 +384,38 @@ async def coach_slots(coach_id: str, service_id: str, days: int = Query(default=
         for item in [*reservations, *(item for item in exceptions if not item["available"])]
     ]
     windows: list[tuple[datetime, datetime]] = []
-    for offset in range(days + series_span_days + 1):
+    for offset in range(requested_days + 1):
         target = now.date() + timedelta(days=offset)
+        if target.weekday() not in service_weekdays:
+            continue
         for rule in rules:
             if target.weekday() != rule["weekday"]:
                 continue
             zone = ZoneInfo(rule.get("timezone") or "Europe/Madrid")
-            start = datetime.combine(target, datetime_time.fromisoformat(rule["starts_at"]), tzinfo=zone).astimezone(timezone.utc)
-            end = datetime.combine(target, datetime_time.fromisoformat(rule["ends_at"]), tzinfo=zone).astimezone(timezone.utc)
+            start = datetime.combine(target, max(datetime_time.fromisoformat(rule["starts_at"]), service_start_time), tzinfo=zone).astimezone(timezone.utc)
+            end = datetime.combine(target, min(datetime_time.fromisoformat(rule["ends_at"]), service_end_time), tzinfo=zone).astimezone(timezone.utc)
+            if end <= start:
+                continue
             windows.append((start, end))
-    windows.extend(
-        (
-            datetime.fromisoformat(item["starts_at"].replace("Z", "+00:00")),
-            datetime.fromisoformat(item["ends_at"].replace("Z", "+00:00")),
-        )
-        for item in exceptions
-        if item["available"]
-    )
+    exception_zone = ZoneInfo("Europe/Madrid")
+    for item in exceptions:
+        if not item["available"]:
+            continue
+        exception_start = datetime.fromisoformat(item["starts_at"].replace("Z", "+00:00"))
+        exception_end = datetime.fromisoformat(item["ends_at"].replace("Z", "+00:00"))
+        local_start = exception_start.astimezone(exception_zone)
+        if local_start.weekday() not in service_weekdays:
+            continue
+        service_window_start = datetime.combine(local_start.date(), service_start_time, tzinfo=exception_zone).astimezone(timezone.utc)
+        service_window_end = datetime.combine(local_start.date(), service_end_time, tzinfo=exception_zone).astimezone(timezone.utc)
+        window_start = max(exception_start, service_window_start)
+        window_end = min(exception_end, service_window_end)
+        if window_end > window_start:
+            windows.append((window_start, window_end))
 
     items: list[dict[str, str]] = []
-    earliest = now + timedelta(minutes=30)
+    notice_minutes = int(coach_profiles[0].get("min_booking_notice_minutes") or 0) if coach_profiles else 30
+    earliest = now + timedelta(minutes=notice_minutes)
     for window_start, window_end in sorted(windows):
         cursor = max(window_start, earliest)
         cursor = cursor.replace(second=0, microsecond=0)
@@ -424,8 +445,8 @@ async def coach_slots(coach_id: str, service_id: str, days: int = Query(default=
             ]
             if all(start in available_starts for start in occurrences):
                 anchors.append({**item, "occurrences": occurrences})
-        return {"items": anchors[:80]}
-    return {"items": [item for item in items if datetime.fromisoformat(item["starts_at"]) <= anchor_horizon][:80]}
+        return {"items": anchors}
+    return {"items": [item for item in items if datetime.fromisoformat(item["starts_at"]) <= anchor_horizon]}
 
 
 @app.get("/api/v1/me", tags=["account"])
@@ -564,7 +585,7 @@ async def coach_calendar(
     return {
         "bookings": await db.select(
             "bookings",
-            select="*,coach_services(name,duration_minutes),profiles(display_name)",
+            select="*,coach_services(name,description,duration_minutes,mode),profiles(display_name)",
             coach_id=f"eq.{user.id}",
             starts_at=f"lt.{date_to.isoformat()}",
             ends_at=f"gt.{date_from.isoformat()}",
@@ -621,6 +642,21 @@ async def set_responds_now(payload: RespondsNowRequest, user: AuthUser = Depends
     )
     if not rows:
         raise HTTPException(404, "Completa primero tu perfil profesional")
+    return rows[0]
+
+
+@app.patch("/api/v1/coach/booking-settings", tags=["coach"])
+async def update_booking_settings(payload: BookingSettingsRequest, user: AuthUser = Depends(current_user)) -> dict[str, Any]:
+    rows = await db.update(
+        "coach_profiles",
+        {
+            "min_booking_notice_minutes": payload.min_booking_notice_minutes,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        },
+        user_id=f"eq.{user.id}",
+    )
+    if not rows:
+        raise HTTPException(404, "Perfil profesional no encontrado")
     return rows[0]
 
 
@@ -811,8 +847,17 @@ async def book_with_package(
         raise HTTPException(409, "El bono no está activo")
     if packages_found[0]["coach_id"] == user.id:
         raise HTTPException(409, "No puedes reservar un entrenamiento contigo mismo")
+    await asyncio.gather(
+        assert_user_capability(user.id, "training", db),
+        assert_user_capability(packages_found[0]["coach_id"], "training", db),
+    )
     if packages_found[0].get("offer_type") == "recurring_plan":
         raise HTTPException(409, "Las fechas de este plan ya se reservaron al comprarlo")
+    services_found = await db.select("coach_services", id=f"eq.{packages_found[0]['service_id']}", active="eq.true")
+    coaches_found = await db.select("coach_profiles", user_id=f"eq.{packages_found[0]['coach_id']}")
+    if not services_found or not coaches_found:
+        raise HTTPException(409, "El servicio ya no está disponible")
+    validate_booking_schedule(services_found[0], coaches_found[0], [payload.starts_at])
     await ensure_package_credits(packages_found[0])
     credits = await db.select(
         "session_credits", package_id=f"eq.{payload.package_id}", status="eq.available", order="ordinal.asc", limit="1",
@@ -838,12 +883,22 @@ async def book_with_package(
 
 
 @app.get("/api/v1/bookings", tags=["bookings"])
-async def bookings(user: AuthUser = Depends(current_user)) -> list[dict[str, Any]]:
+async def bookings(
+    perspective: Literal["consumer", "coach", "all"] = Query(default="all"),
+    user: AuthUser = Depends(current_user),
+) -> list[dict[str, Any]]:
     await advance_training_lifecycle()
+    role_filter = (
+        {"consumer_id": f"eq.{user.id}"}
+        if perspective == "consumer"
+        else {"coach_id": f"eq.{user.id}"}
+        if perspective == "coach"
+        else {"or_": f"(consumer_id.eq.{user.id},coach_id.eq.{user.id})"}
+    )
     return await db.select(
         "bookings",
         select="*,coach_services(name,duration_minutes),coach_profiles(headline,profiles(display_name)),profiles(display_name),session_reports(id,author_id,outcome,circumstances,note),reviews(id,author_id,revealed_at)",
-        or_=f"(consumer_id.eq.{user.id},coach_id.eq.{user.id})",
+        **role_filter,
         order="starts_at.desc",
     )
 
@@ -1074,6 +1129,10 @@ async def decide_booking_request(
     now_iso = datetime.now(timezone.utc).isoformat()
 
     if payload.decision == "accept":
+        await asyncio.gather(
+            assert_user_capability(user.id, "training", db),
+            assert_user_capability(booking_request["consumer_id"], "training", db),
+        )
         if intent_id:
             capture_payment_intent(intent_id, f"request-accept:{request_id}")
         await db.update("booking_requests", {"status": "accepted", "decided_at": now_iso, "reason_code": payload.reason_code}, id=f"eq.{request_id}")
@@ -1118,16 +1177,26 @@ async def conversations(user: AuthUser = Depends(current_user)) -> list[dict[str
         or_=f"(consumer_id.eq.{user.id},coach_id.eq.{user.id})", order="last_message_at.desc",
     )
     participant_ids = sorted({participant_id for row in rows for participant_id in (row["consumer_id"], row["coach_id"])})
-    profiles = await db.select("profiles", select="id,display_name", id=f"in.({','.join(participant_ids)})") if participant_ids else []
+    profiles, own_blocks, incoming_blocks = await asyncio.gather(
+        db.select("profiles", select="id,display_name,avatar_url,role", id=f"in.({','.join(participant_ids)})") if participant_ids else asyncio.sleep(0, result=[]),
+        db.select("blocked_users", blocker_id=f"eq.{user.id}"),
+        db.select("blocked_users", blocked_id=f"eq.{user.id}"),
+    )
     profiles_by_id = {profile["id"]: profile for profile in profiles}
+    own_blocked_ids = {item["blocked_id"] for item in own_blocks}
+    incoming_blocker_ids = {item["blocker_id"] for item in incoming_blocks}
     for row in rows:
         row["consumer"] = profiles_by_id.get(row["consumer_id"])
         row["coach"] = profiles_by_id.get(row["coach_id"])
+        other_user_id = row["coach_id"] if row["consumer_id"] == user.id else row["consumer_id"]
+        row["blocked_by_me"] = other_user_id in own_blocked_ids
+        row["blocked_me"] = other_user_id in incoming_blocker_ids
     return rows
 
 
 @app.post("/api/v1/conversations", tags=["chat"])
 async def create_conversation(payload: ConversationCreateRequest, user: AuthUser = Depends(current_user)) -> dict[str, Any]:
+    await assert_user_capability(user.id, "messaging", db)
     await assert_not_blocked(user.id, payload.coach_id)
     coaches = await db.select("coach_profiles", user_id=f"eq.{payload.coach_id}", verification_status="eq.verified")
     if not coaches:
@@ -1178,8 +1247,9 @@ async def send_message(
         raise HTTPException(422, "La ruta del adjunto no pertenece a esta conversación")
     # These checks are independent. Running them together removes two network
     # round trips from the critical path while preserving all validations.
-    _, existing_messages, sender_rows = await asyncio.gather(
+    _, _, existing_messages, sender_rows = await asyncio.gather(
         assert_not_blocked(user.id, other_user_id),
+        assert_user_capability(user.id, "messaging", db),
         db.select("messages", select="id", conversation_id=f"eq.{conversation_id}", limit="1"),
         db.select("profiles", select="display_name", id=f"eq.{user.id}"),
     )
@@ -1267,39 +1337,71 @@ async def read_notification(notification_id: str, user: AuthUser = Depends(curre
 @app.post("/api/v1/reports", tags=["moderation"])
 async def create_report(payload: ReportCreateRequest, user: AuthUser = Depends(current_user)) -> dict[str, Any]:
     conversation_id = payload.conversation_id
+    reported_user_id = payload.reported_user_id
+    message_row: dict[str, Any] | None = None
     if payload.message_id:
         messages_found = await db.select("messages", id=f"eq.{payload.message_id}")
         if not messages_found:
             raise HTTPException(404, "Mensaje no encontrado")
-        conversation_id = messages_found[0]["conversation_id"]
+        message_row = messages_found[0]
+        conversation_id = message_row["conversation_id"]
     if conversation_id:
-        await assert_participant(conversation_id, user.id)
-    elif not payload.reported_user_id:
+        conversation = await assert_participant(conversation_id, user.id)
+        inferred_user_id = conversation["coach_id"] if conversation["consumer_id"] == user.id else conversation["consumer_id"]
+        if message_row:
+            if message_row["sender_id"] == user.id:
+                raise HTTPException(422, "No puedes denunciar tu propio mensaje")
+            inferred_user_id = message_row["sender_id"]
+        if reported_user_id and reported_user_id != inferred_user_id:
+            raise HTTPException(422, "El usuario denunciado no pertenece a este contenido")
+        reported_user_id = inferred_user_id
+    elif not reported_user_id:
         raise HTTPException(422, "Indica la conversación, mensaje o usuario denunciado")
-    return await db.insert(
+    if reported_user_id == user.id:
+        raise HTTPException(422, "No puedes denunciarte a ti mismo")
+    profiles = await db.select("profiles", select="id", id=f"eq.{reported_user_id}")
+    if not profiles:
+        raise HTTPException(404, "Usuario denunciado no encontrado")
+    report = await db.insert(
         "reports",
         {
             "reporter_id": user.id,
-            **payload.model_dump(),
             "conversation_id": conversation_id,
+            "message_id": payload.message_id,
+            "reported_user_id": reported_user_id,
+            "reason": payload.reason.strip(),
+            "details": payload.details.strip(),
         },
     )
+    if payload.message_id:
+        await db.update("messages", {"reported_at": datetime.now(timezone.utc).isoformat()}, id=f"eq.{payload.message_id}")
+    return report
 
 
 @app.get("/api/v1/blocks", tags=["moderation"])
 async def blocks(user: AuthUser = Depends(current_user)) -> list[dict[str, Any]]:
-    return await db.select("blocked_users", blocker_id=f"eq.{user.id}", order="created_at.desc")
+    rows = await db.select("blocked_users", blocker_id=f"eq.{user.id}", order="created_at.desc")
+    blocked_ids = [item["blocked_id"] for item in rows]
+    profiles = await db.select(
+        "profiles", select="id,display_name,avatar_url,role", id=f"in.({','.join(blocked_ids)})",
+    ) if blocked_ids else []
+    profiles_by_id = {item["id"]: item for item in profiles}
+    return [{**item, "profile": profiles_by_id.get(item["blocked_id"])} for item in rows]
 
 
 @app.post("/api/v1/blocks", tags=["moderation"])
 async def block_user(payload: BlockUserRequest, user: AuthUser = Depends(current_user)) -> dict[str, Any]:
     if payload.user_id == user.id:
         raise HTTPException(422, "No puedes bloquearte a ti mismo")
-    return await db.upsert(
+    profiles = await db.select("profiles", select="id,display_name,avatar_url,role", id=f"eq.{payload.user_id}")
+    if not profiles:
+        raise HTTPException(404, "Usuario no encontrado")
+    row = await db.upsert(
         "blocked_users",
         {"blocker_id": user.id, "blocked_id": payload.user_id},
         "blocker_id,blocked_id",
     )
+    return {**row, "profile": profiles[0]}
 
 
 @app.delete("/api/v1/blocks/{blocked_user_id}", tags=["moderation"])
@@ -1566,14 +1668,24 @@ async def verify_coach(coach_id: str, payload: VerificationRequest, user: AuthUs
 @app.get("/api/v1/admin/users", tags=["admin"])
 async def admin_users(user: AuthUser = Depends(current_user)) -> list[dict[str, Any]]:
     await assert_admin(user.id)
-    profiles, coaches, auth_users = await asyncio.gather(
-        db.select("profiles", select="id,display_name,role,created_at,updated_at", order="created_at.desc"),
+    now_iso = datetime.now(timezone.utc).isoformat()
+    profiles, coaches, auth_users, active_sanctions = await asyncio.gather(
+        db.select("profiles", select="id,display_name,avatar_url,role,created_at,updated_at", order="created_at.desc"),
         db.select("coach_profiles", select="user_id,verification_status,verification_note"),
         auth_admin_list_users(),
+        db.select(
+            "moderation_sanctions",
+            select="id,user_id,kind,reason,starts_at,expires_at,report_id,created_at",
+            starts_at=f"lte.{now_iso}", expires_at=f"gt.{now_iso}", revoked_at="is.null",
+            order="expires_at.asc",
+        ),
     )
     profiles_by_id = {item["id"]: item for item in profiles}
     coaches_by_id = {item["user_id"]: item for item in coaches}
     auth_by_id = {item["id"]: item for item in auth_users}
+    sanctions_by_user: dict[str, list[dict[str, Any]]] = {}
+    for sanction in active_sanctions:
+        sanctions_by_user.setdefault(sanction["user_id"], []).append(sanction)
     ordered_ids = [item["id"] for item in auth_users]
     ordered_ids.extend(item["id"] for item in profiles if item["id"] not in auth_by_id)
     result = []
@@ -1594,8 +1706,9 @@ async def admin_users(user: AuthUser = Depends(current_user)) -> list[dict[str, 
             "role": profile.get("role", "consumer"),
             "created_at": profile.get("created_at") or auth_user.get("created_at"),
             "last_sign_in_at": auth_user.get("last_sign_in_at"),
-            "access_enabled": access_enabled,
+            "access_enabled": access_enabled and not any(item["kind"] == "account" for item in sanctions_by_user.get(user_id, [])),
             "coach": coaches_by_id.get(user_id),
+            "active_sanctions": sanctions_by_user.get(user_id, []),
         })
     return result
 
@@ -1663,7 +1776,146 @@ async def admin_archive_category(category_id: str, user: AuthUser = Depends(curr
 @app.get("/api/v1/admin/reports", tags=["admin"])
 async def admin_reports(user: AuthUser = Depends(current_user)) -> list[dict[str, Any]]:
     await assert_admin(user.id)
-    return await db.select("reports", order="created_at.asc")
+    reports = await db.select("reports", order="created_at.desc")
+    profile_ids = sorted({profile_id for item in reports for profile_id in (item.get("reporter_id"), item.get("reported_user_id")) if profile_id})
+    message_ids = sorted({item["message_id"] for item in reports if item.get("message_id")})
+    report_ids = [item["id"] for item in reports]
+    profiles, messages_found, sanctions = await asyncio.gather(
+        db.select("profiles", select="id,display_name,avatar_url,role", id=f"in.({','.join(profile_ids)})") if profile_ids else asyncio.sleep(0, result=[]),
+        db.select("messages", select="id,body,sender_id,created_at", id=f"in.({','.join(message_ids)})") if message_ids else asyncio.sleep(0, result=[]),
+        db.select(
+            "moderation_sanctions", select="id,user_id,kind,reason,starts_at,expires_at,revoked_at,report_id",
+            report_id=f"in.({','.join(report_ids)})", order="created_at.desc",
+        ) if report_ids else asyncio.sleep(0, result=[]),
+    )
+    profiles_by_id = {item["id"]: item for item in profiles}
+    messages_by_id = {item["id"]: item for item in messages_found}
+    sanctions_by_report: dict[str, list[dict[str, Any]]] = {}
+    for sanction in sanctions:
+        if sanction.get("report_id"):
+            sanctions_by_report.setdefault(sanction["report_id"], []).append(sanction)
+    return [
+        {
+            **item,
+            "reporter": profiles_by_id.get(item["reporter_id"]),
+            "reported_user": profiles_by_id.get(item.get("reported_user_id")),
+            "message": messages_by_id.get(item.get("message_id")),
+            "sanctions": sanctions_by_report.get(item["id"], []),
+        }
+        for item in reports
+    ]
+
+
+@app.get("/api/v1/admin/sanctions", tags=["admin"])
+async def admin_sanctions(user: AuthUser = Depends(current_user)) -> list[dict[str, Any]]:
+    await assert_admin(user.id)
+    rows = await db.select("moderation_sanctions", order="created_at.desc")
+    profile_ids = sorted({item["user_id"] for item in rows})
+    profiles = await db.select(
+        "profiles", select="id,display_name,avatar_url,role", id=f"in.({','.join(profile_ids)})",
+    ) if profile_ids else []
+    profiles_by_id = {item["id"]: item for item in profiles}
+    return [{**item, "profile": profiles_by_id.get(item["user_id"])} for item in rows]
+
+
+@app.post("/api/v1/admin/sanctions", tags=["admin"])
+async def admin_create_sanction(
+    payload: AdminSanctionCreateRequest,
+    user: AuthUser = Depends(current_user),
+) -> dict[str, Any]:
+    await assert_admin(user.id)
+    if payload.user_id == user.id and payload.kind == "account":
+        raise HTTPException(409, "No puedes suspender tu propia cuenta administradora")
+    profiles = await db.select("profiles", select="id,display_name", id=f"eq.{payload.user_id}")
+    if not profiles:
+        raise HTTPException(404, "Usuario no encontrado")
+    if payload.report_id:
+        reports_found = await db.select("reports", id=f"eq.{payload.report_id}")
+        if not reports_found:
+            raise HTTPException(404, "Denuncia no encontrada")
+        if reports_found[0].get("reported_user_id") != payload.user_id:
+            raise HTTPException(422, "La sanción no corresponde al usuario denunciado")
+    now = datetime.now(timezone.utc)
+    existing = await db.select(
+        "moderation_sanctions", select="id", user_id=f"eq.{payload.user_id}", kind=f"eq.{payload.kind}",
+        expires_at=f"gt.{now.isoformat()}", revoked_at="is.null", limit="1",
+    )
+    if existing:
+        raise HTTPException(409, "Este usuario ya tiene una restricción activa de ese tipo")
+    expires_at = now + timedelta(hours=payload.duration_hours)
+    row = await db.insert(
+        "moderation_sanctions",
+        {
+            "user_id": payload.user_id,
+            "kind": payload.kind,
+            "reason": payload.reason.strip(),
+            "starts_at": now.isoformat(),
+            "expires_at": expires_at.isoformat(),
+            "report_id": payload.report_id,
+            "imposed_by": user.id,
+        },
+    )
+    if payload.kind == "account":
+        try:
+            await auth_admin_set_user_ban_duration(payload.user_id, payload.duration_hours)
+        except Exception:
+            await db.update(
+                "moderation_sanctions",
+                {"revoked_at": datetime.now(timezone.utc).isoformat(), "revoked_by": user.id, "revocation_reason": "No se pudo aplicar en Supabase Auth"},
+                id=f"eq.{row['id']}",
+            )
+            raise
+    if payload.report_id:
+        await db.update("reports", {"status": "reviewing"}, id=f"eq.{payload.report_id}")
+    await db.insert("audit_logs", {
+        "actor_id": user.id,
+        "action": "moderation.sanction.created",
+        "entity_type": "moderation_sanction",
+        "entity_id": row["id"],
+        "metadata": {"kind": payload.kind, "user_id": payload.user_id, "expires_at": expires_at.isoformat(), "report_id": payload.report_id},
+    })
+    try:
+        await notify_user(
+            payload.user_id,
+            "moderation_sanction",
+            "Medida temporal aplicada",
+            f"CoachConnect ha restringido temporalmente {SANCTION_DETAILS_FOR_USER[payload.kind]} hasta el {expires_at.astimezone(ZoneInfo('Europe/Madrid')).strftime('%d/%m/%Y a las %H:%M')}.",
+            "/cuenta",
+        )
+    except Exception as exc:
+        logger.warning("La sanción %s se aplicó, pero la notificación falló: %s", row["id"], exc)
+    return {**row, "profile": profiles[0]}
+
+
+@app.patch("/api/v1/admin/sanctions/{sanction_id}/revoke", tags=["admin"])
+async def admin_revoke_sanction(
+    sanction_id: str,
+    payload: AdminSanctionRevokeRequest,
+    user: AuthUser = Depends(current_user),
+) -> dict[str, Any]:
+    await assert_admin(user.id)
+    rows = await db.select("moderation_sanctions", id=f"eq.{sanction_id}")
+    if not rows:
+        raise HTTPException(404, "Restricción no encontrada")
+    sanction = rows[0]
+    if sanction.get("revoked_at"):
+        raise HTTPException(409, "La restricción ya estaba revocada")
+    if sanction["kind"] == "account":
+        await auth_admin_set_user_ban_duration(sanction["user_id"], None)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    updated = await db.update(
+        "moderation_sanctions",
+        {"revoked_at": now_iso, "revoked_by": user.id, "revocation_reason": payload.reason.strip()},
+        id=f"eq.{sanction_id}", revoked_at="is.null",
+    )
+    if not updated:
+        raise HTTPException(409, "La restricción ya estaba revocada")
+    await db.insert("audit_logs", {
+        "actor_id": user.id, "action": "moderation.sanction.revoked",
+        "entity_type": "moderation_sanction", "entity_id": sanction_id,
+        "metadata": {"kind": sanction["kind"], "user_id": sanction["user_id"]},
+    })
+    return updated[0]
 
 
 @app.get("/api/v1/admin/session-disputes", tags=["admin"])
@@ -1762,12 +2014,21 @@ async def admin_payments(user: AuthUser = Depends(current_user)) -> list[dict[st
 
 
 @app.patch("/api/v1/admin/reports/{report_id}", tags=["admin"])
-async def admin_resolve_report(report_id: str, status_value: str, user: AuthUser = Depends(current_user)) -> dict[str, Any]:
+async def admin_resolve_report(
+    report_id: str,
+    payload: AdminReportUpdateRequest,
+    user: AuthUser = Depends(current_user),
+) -> dict[str, Any]:
     await assert_admin(user.id)
-    if status_value not in {"reviewing", "resolved", "dismissed"}:
-        raise HTTPException(422, "Estado de moderación no válido")
-    rows = await db.update("reports", {"status": status_value}, id=f"eq.{report_id}")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    update_payload: dict[str, Any] = {
+        "status": payload.status,
+        "resolution_note": payload.resolution_note.strip(),
+        "resolved_by": user.id if payload.status in {"resolved", "dismissed"} else None,
+        "resolved_at": now_iso if payload.status in {"resolved", "dismissed"} else None,
+    }
+    rows = await db.update("reports", update_payload, id=f"eq.{report_id}")
     if not rows:
         raise HTTPException(404, "Denuncia no encontrada")
-    await db.insert("audit_logs", {"actor_id": user.id, "action": "report.updated", "entity_type": "report", "entity_id": report_id, "metadata": {"status": status_value}})
+    await db.insert("audit_logs", {"actor_id": user.id, "action": "report.updated", "entity_type": "report", "entity_id": report_id, "metadata": {"status": payload.status}})
     return rows[0]
