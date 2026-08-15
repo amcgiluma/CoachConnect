@@ -1,4 +1,5 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent } from 'react'
+import { Fragment, lazy, Suspense, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { Toaster, toast } from 'sonner'
@@ -113,6 +114,8 @@ type CoachServiceRecord = {
   active: boolean
   offer_type: 'single' | 'flex_pack' | 'recurring_plan'
   booking_mode: 'instant' | 'request'
+  acceptance_window_hours?: number
+  request_booking_notice_minutes?: number
   expiry_days?: number | null
   cadence_weeks?: number | null
   recurring_schedule_mode?: 'fixed' | 'flexible'
@@ -163,6 +166,22 @@ type BookingRecord = {
     revealed_at?: string | null
   }>
 }
+type ClientReward = {
+  qualifying_review_count: number
+  tier: 'standard' | 'bronze' | 'silver' | 'gold'
+  commission_discount_bps: number
+  effective_platform_fee_percent: number
+  next_tier_at: number | null
+}
+type PendingFeedbackItem = {
+  booking: BookingRecord
+  perspective: 'consumer' | 'coach'
+  needs_outcome: boolean
+  needs_review: boolean
+  review_deadline: string
+  action_url: string
+}
+type PendingFeedbackResponse = { items: PendingFeedbackItem[]; reward: ClientReward }
 type ProfessionalOverviewData = {
   coachProfile: (CoachProfileRecord & { availability_rules?: any[]; stripe_account_id?: string | null }) | null
   services: CoachServiceRecord[]
@@ -252,6 +271,7 @@ const coachFromProfile = (row: CoachProfileRecord, fallback?: Coach): Coach => {
       packageSize: item.package_size,
       offerType: item.offer_type || (item.package_size > 1 ? 'flex_pack' : 'single'),
       bookingMode: item.booking_mode || 'instant',
+      requestBookingNoticeMinutes: item.request_booking_notice_minutes ?? 2160,
       expiryDays: item.expiry_days,
       cadenceWeeks: item.cadence_weeks,
       recurringScheduleMode: item.recurring_schedule_mode || (item.offer_type === 'recurring_plan' && item.cadence_weeks == null ? 'flexible' : 'fixed'),
@@ -314,6 +334,35 @@ const formatServiceHours = (startsAt = '00:00', endsAt = '23:59') => {
   return start === '00:00' && end === '23:59' ? 'Según agenda general' : `${start}—${end}`
 }
 
+const rewardLabels: Record<ClientReward['tier'], string> = {
+  standard: 'Estándar',
+  bronze: 'Bronce',
+  silver: 'Plata',
+  gold: 'Oro',
+}
+
+const notifyFeedbackUpdated = () => window.dispatchEvent(new Event('coachconnect:feedback-updated'))
+
+function Time24Field({ value, onChange, label, disabled = false }: { value: string; onChange: (value: string) => void; label: string; disabled?: boolean }) {
+  const [hour = '00', minute = '00'] = value.slice(0, 5).split(':')
+  const hours = Array.from({ length: 24 }, (_, index) => String(index).padStart(2, '0'))
+  const minutes = Array.from({ length: 60 }, (_, index) => String(index).padStart(2, '0'))
+  return <span className="time-24-field" role="group" aria-label={label}>
+    <select aria-label={`${label}: hora`} value={hour} disabled={disabled} onChange={(event) => onChange(`${event.target.value}:${minute}`)}>
+      {hours.map((item) => <option value={item} key={item}>{item}</option>)}
+    </select>
+    <span aria-hidden="true">:</span>
+    <select aria-label={`${label}: minutos`} value={minute} disabled={disabled} onChange={(event) => onChange(`${hour}:${event.target.value}`)}>
+      {minutes.map((item) => <option value={item} key={item}>{item}</option>)}
+    </select>
+  </span>
+}
+
+function PortalTo({ target, children, waitForTarget = false }: { target: HTMLElement | null; children: ReactNode; waitForTarget?: boolean }) {
+  if (target) return createPortal(children, target)
+  return waitForTarget ? null : children
+}
+
 const startOfWeek = (value: Date) => {
   const date = new Date(value)
   const day = (date.getDay() + 6) % 7
@@ -373,6 +422,7 @@ function CoachConnect() {
   return (
     <div className={`app-shell ${isHomeRoute ? 'home-route' : ''}`}>
       <Header onAuth={() => setAuthOpen(true)} />
+      <FeedbackReminderBanner />
       <main>
         <Routes>
           <Route path="/" element={<Home />} />
@@ -392,6 +442,40 @@ function CoachConnect() {
       <Toaster position="bottom-center" richColors closeButton />
     </div>
   )
+}
+
+function FeedbackReminderBanner() {
+  const { user } = useAuth()
+  const location = useLocation()
+  const [items, setItems] = useState<PendingFeedbackItem[]>([])
+  const load = () => {
+    if (!user) {
+      setItems([])
+      return
+    }
+    api<PendingFeedbackResponse>('/api/v1/feedback/pending')
+      .then((data) => setItems(data.items))
+      .catch(() => undefined)
+  }
+  useEffect(() => {
+    load()
+  }, [user?.id, location.pathname, location.search])
+  useEffect(() => {
+    window.addEventListener('coachconnect:feedback-updated', load)
+    return () => window.removeEventListener('coachconnect:feedback-updated', load)
+  }, [user?.id])
+  if (!user || !items.length) return null
+  const item = items[0]
+  const pendingActions = Number(item.needs_outcome) + Number(item.needs_review)
+  const pendingDate = new Date(item.booking.starts_at).toLocaleString('es-ES', { dateStyle: 'medium', timeStyle: 'short' })
+  return <aside className="feedback-reminder-banner" aria-live="polite">
+    <BadgeCheck />
+    <span>
+      <strong>{items.length === 1 ? 'Tienes una sesión pendiente de cerrar.' : `Tienes ${items.length} sesiones pendientes de cerrar.`}</strong>
+      <small><time dateTime={item.booking.starts_at}>{pendingDate}</time><span aria-hidden="true">·</span>{pendingActions === 2 ? 'Confirma el resultado y deja tu valoración.' : item.needs_outcome ? 'Confirma cómo se desarrolló.' : 'Tu valoración está pendiente.'}</small>
+    </span>
+    <Link to={item.action_url}>Revisar ahora <ArrowRight /></Link>
+  </aside>
 }
 
 function Header({ onAuth }: { onAuth: () => void }) {
@@ -463,7 +547,7 @@ function Header({ onAuth }: { onAuth: () => void }) {
   )
 }
 
-function ConfirmDialog({ title, copy, confirmLabel, busy, onCancel, onConfirm }: { title: string; copy: string; confirmLabel: string; busy?: boolean; onCancel: () => void; onConfirm: () => void }) {
+function ConfirmDialog({ title, copy, confirmLabel, busy, kind = 'logout', onCancel, onConfirm }: { title: string; copy: string; confirmLabel: string; busy?: boolean; kind?: 'logout' | 'decision'; onCancel: () => void; onConfirm: () => void }) {
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && !busy) onCancel()
@@ -480,7 +564,7 @@ function ConfirmDialog({ title, copy, confirmLabel, busy, onCancel, onConfirm }:
     >
       <section className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
         <div className="confirm-icon">
-          <LogOut />
+          {kind === 'decision' ? <ShieldCheck /> : <LogOut />}
         </div>
         <p className="eyebrow">Confirmación</p>
         <h2 id="confirm-title">{title}</h2>
@@ -1611,6 +1695,7 @@ function ReviewDialog({ booking, isCoach, onClose, onSaved }: { booking: Booking
         body: JSON.stringify(payload),
       })
       toast.success('Valoración guardada. Se revelará cuando responda la otra parte o venza el plazo.')
+      notifyFeedbackUpdated()
       onSaved()
       onClose()
     } catch (error) {
@@ -1691,6 +1776,7 @@ function OutcomeDialog({ booking, onClose, onSaved }: { booking: BookingRecord; 
         }),
       })
       toast.success('Resultado registrado. La otra parte tiene 48 horas para responder.')
+      notifyFeedbackUpdated()
       onSaved()
       onClose()
     } catch (error) {
@@ -1786,7 +1872,9 @@ function CancellationDialog({ booking, onClose, onConfirm }: { booking: BookingR
   )
 }
 
-export function BookingDetailsDialog({ booking, perspective, onClose }: { booking: BookingRecord; perspective: 'coach' | 'consumer'; onClose: () => void }) {
+export function BookingDetailsDialog({ booking, perspective, currentUserId, onClose, onSaved }: { booking: BookingRecord; perspective: 'coach' | 'consumer'; currentUserId?: string; onClose: () => void; onSaved?: () => void }) {
+  const [activeOutcome, setActiveOutcome] = useState(false)
+  const [activeReview, setActiveReview] = useState(false)
   const startsAt = new Date(booking.starts_at)
   const endsAt = new Date(booking.ends_at)
   const duration = booking.coach_services?.duration_minutes || Math.round((endsAt.getTime() - startsAt.getTime()) / 60000)
@@ -1794,7 +1882,16 @@ export function BookingDetailsDialog({ booking, perspective, onClose }: { bookin
     ? booking.profiles?.display_name || 'Cliente CoachConnect'
     : booking.coach_profiles?.profiles?.display_name || 'Entrenador CoachConnect'
   const status = ({ pending_payment: 'Pago pendiente', confirmed: 'Confirmada', completed: 'Completada', cancelled: 'Cancelada', disputed: 'En revisión', refunded: 'Reembolsada' } as Record<string, string>)[booking.status] || booking.status
-  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
+  const ownReport = currentUserId ? booking.session_reports?.find((report) => report.author_id === currentUserId) : undefined
+  const ownReview = currentUserId ? booking.reviews?.find((review) => review.author_id === currentUserId) : undefined
+  const attended = ['attended', 'attended_with_issues', 'assumed_attended'].includes(booking.outcome_status || '') || ['attended', 'attended_with_issues'].includes(ownReport?.outcome || '')
+  const needsOutcome = Boolean(currentUserId && booking.status === 'completed' && !booking.outcome_finalized_at && !ownReport)
+  const canReview = Boolean(currentUserId && booking.status === 'completed' && attended && !ownReview)
+  const saved = () => {
+    onSaved?.()
+    notifyFeedbackUpdated()
+  }
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !activeOutcome && !activeReview) onClose() }}>
     <section className="booking-detail-dialog" role="dialog" aria-modal="true" aria-labelledby="booking-detail-title">
       <header>
         <div><p className="eyebrow">{status}</p><h2 id="booking-detail-title">{booking.coach_services?.name || 'Sesión de entrenamiento'}</h2></div>
@@ -1816,26 +1913,45 @@ export function BookingDetailsDialog({ booking, perspective, onClose }: { bookin
       </div>
       <footer>
         {booking.video_url ? <a className="button button-primary button-md" href={booking.video_url} target="_blank" rel="noreferrer"><Video /> Entrar a la videollamada</a> : <span><ShieldCheck /> {booking.coach_services?.mode === 'online' ? 'El enlace aparecerá aquí cuando esté preparado.' : 'Sin enlace de videollamada para esta sesión.'}</span>}
+        {(needsOutcome || canReview || ownReview) && <div className="booking-detail-actions">
+          {needsOutcome && <Button onClick={() => setActiveOutcome(true)}>Confirmar resultado</Button>}
+          {canReview && <button className="text-button visible-text-button" onClick={() => setActiveReview(true)}><Star /> Valorar {perspective === 'coach' ? 'al cliente' : 'al entrenador'}</button>}
+          {ownReview && <span className="locked-action"><Check /> Valoración guardada</span>}
+        </div>}
       </footer>
+      {activeOutcome && <OutcomeDialog booking={booking} onClose={() => setActiveOutcome(false)} onSaved={saved} />}
+      {activeReview && <ReviewDialog booking={booking} isCoach={perspective === 'coach'} onClose={() => setActiveReview(false)} onSaved={saved} />}
     </section>
   </div>
 }
 
 export function SessionCalendar({ bookings, perspective, onSelect }: { bookings: BookingRecord[]; perspective: 'coach' | 'consumer'; onSelect: (booking: BookingRecord) => void }) {
-  const upcoming = bookings.filter((item) => new Date(item.ends_at).getTime() >= Date.now() && ['pending_payment', 'confirmed'].includes(item.status))
+  const calendarBookings = bookings.filter((item) => !Number.isNaN(new Date(item.starts_at).getTime()))
   const [view, setView] = useState<'week' | 'month'>('week')
-  const [anchor, setAnchor] = useState(() => upcoming[0] ? startOfDay(new Date(upcoming[0].starts_at)) : startOfDay(new Date()))
+  const [anchor, setAnchor] = useState(() => {
+    const today = startOfDay(new Date())
+    const hasSessionsThisMonth = calendarBookings.some((item) => {
+      const startsAt = new Date(item.starts_at)
+      return startsAt.getFullYear() === today.getFullYear() && startsAt.getMonth() === today.getMonth()
+    })
+    if (hasSessionsThisMonth || !calendarBookings.length) return today
+    const mostRecent = [...calendarBookings].sort((left, right) => new Date(right.starts_at).getTime() - new Date(left.starts_at).getTime())[0]
+    return startOfDay(new Date(mostRecent.starts_at))
+  })
   const visibleDays = calendarDaysFor(view, anchor)
   const move = (direction: number) => setAnchor((current) => view === 'month' ? addMonths(current, direction) : addDays(current, direction * 7))
+  const statusLabels: Record<string, string> = { pending_payment: 'Pago pendiente', confirmed: 'Confirmada', completed: 'Completada', cancelled: 'Cancelada', disputed: 'En revisión', refunded: 'Reembolsada' }
   const title = view === 'month'
     ? anchor.toLocaleDateString('es-ES', { month: 'long', year: 'numeric' })
     : `${visibleDays[0].toLocaleDateString('es-ES', { day: 'numeric', month: 'short' })} — ${visibleDays[6].toLocaleDateString('es-ES', { day: 'numeric', month: 'short' })}`
-  return <section className={`week-calendar account-calendar calendar-${view}`} aria-label="Calendario de próximas clases">
-    <header><div><p className="eyebrow">Próximas clases</p><h3>{title}</h3></div><div className="calendar-toolbar"><div className="calendar-view-tabs" role="group" aria-label="Visualización del calendario"><button type="button" className={view === 'week' ? 'active' : ''} aria-pressed={view === 'week'} onClick={() => setView('week')}>Semana</button><button type="button" className={view === 'month' ? 'active' : ''} aria-pressed={view === 'month'} onClick={() => setView('month')}>Mes</button></div><div className="calendar-controls"><button type="button" aria-label="Periodo anterior" onClick={() => move(-1)}><ChevronLeft /></button><button type="button" onClick={() => setAnchor(startOfDay(new Date()))}>Hoy</button><button type="button" aria-label="Periodo siguiente" onClick={() => move(1)}><ChevronRight /></button></div></div></header>
+  return <section className={`week-calendar account-calendar calendar-${view}`} aria-label="Calendario de sesiones">
+    <header><div><p className="eyebrow">Todas tus sesiones</p><h3>{title}</h3></div><div className="calendar-toolbar"><div className="calendar-view-tabs" role="group" aria-label="Visualización del calendario"><button type="button" className={view === 'week' ? 'active' : ''} aria-pressed={view === 'week'} onClick={() => setView('week')}>Semana</button><button type="button" className={view === 'month' ? 'active' : ''} aria-pressed={view === 'month'} onClick={() => setView('month')}>Mes</button></div><div className="calendar-controls"><button type="button" aria-label="Periodo anterior" onClick={() => move(-1)}><ChevronLeft /></button><button type="button" onClick={() => setAnchor(startOfDay(new Date()))}>Hoy</button><button type="button" aria-label="Periodo siguiente" onClick={() => move(1)}><ChevronRight /></button></div></div></header>
+    {view === 'month' && <div className="calendar-weekday-row" aria-hidden="true">{['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo'].map((day) => <span key={day}>{day}</span>)}</div>}
     <div className="week-grid">{visibleDays.map((date) => {
-      const dayBookings = upcoming.filter((item) => new Date(item.starts_at).toDateString() === date.toDateString())
+      const outsideMonth = view === 'month' && date.getMonth() !== anchor.getMonth()
+      const dayBookings = outsideMonth ? [] : calendarBookings.filter((item) => new Date(item.starts_at).toDateString() === date.toDateString())
       const counterpart = (item: BookingRecord) => perspective === 'coach' ? item.profiles?.display_name || 'Cliente' : item.coach_profiles?.profiles?.display_name || 'Entrenador'
-      return <article className={`${date.toDateString() === new Date().toDateString() ? 'today' : ''} ${view === 'month' && date.getMonth() !== anchor.getMonth() ? 'outside-month' : ''}`} key={date.toISOString()}><div className="week-day-head"><span>{date.toLocaleDateString('es-ES', { weekday: 'short' }).replace('.', '')}</span><strong>{date.getDate()}</strong></div><div className="week-events">{dayBookings.map((item) => <button type="button" className={`calendar-event status-${item.status.replaceAll('_', '-')}`} key={item.id} onClick={() => onSelect(item)} aria-label={`Ver detalles de ${item.coach_services?.name || 'la sesión'} con ${counterpart(item)}`}><time>{new Date(item.starts_at).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</time><strong>{item.coach_services?.name || 'Sesión'}</strong><span>{counterpart(item)}</span></button>)}{!dayBookings.length && <span className="calendar-empty">Sin clases</span>}</div></article>
+      return <article className={`${date.toDateString() === new Date().toDateString() ? 'today' : ''} ${outsideMonth ? 'outside-month' : ''}`} key={date.toISOString()}><div className="week-day-head"><span>{date.toLocaleDateString('es-ES', { weekday: 'short' }).replace('.', '')}</span><strong>{date.getDate()}</strong></div><div className="week-events">{dayBookings.map((item) => <button type="button" className={`calendar-event status-${item.status.replaceAll('_', '-')}`} key={item.id} onClick={() => onSelect(item)} aria-label={`Ver detalles de ${item.coach_services?.name || 'la sesión'} con ${counterpart(item)}`} title={`${new Date(item.starts_at).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })} · ${item.coach_services?.name || 'Sesión'} · ${statusLabels[item.status] || item.status}`}><time>{new Date(item.starts_at).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</time><strong>{item.coach_services?.name || 'Sesión'}</strong><span>{counterpart(item)}</span><small>{statusLabels[item.status] || item.status.replaceAll('_', ' ')}</small></button>)}{!outsideMonth && !dayBookings.length && <span className="calendar-empty">Sin sesiones</span>}</div></article>
     })}</div>
   </section>
 }
@@ -1940,6 +2056,7 @@ export function AccountIdentity({ profile, userId, onSaved }: { profile: Profile
 
 export function Account({ onAuth }: { onAuth: () => void }) {
   const { user, loading } = useAuth()
+  const [accountSearch] = useSearchParams()
   const [profile, setProfile] = useState<Profile | null>(null)
   const [remote, setRemote] = useState<any[]>([])
   const [packages, setPackages] = useState<any[]>([])
@@ -1947,7 +2064,10 @@ export function Account({ onAuth }: { onAuth: () => void }) {
   const [activeOutcome, setActiveOutcome] = useState<BookingRecord | null>(null)
   const [activeCancellation, setActiveCancellation] = useState<BookingRecord | null>(null)
   const [activeBookingDetails, setActiveBookingDetails] = useState<BookingRecord | null>(null)
+  const [reward, setReward] = useState<ClientReward | null>(null)
+  const [pendingFeedback, setPendingFeedback] = useState<PendingFeedbackItem[]>([])
   const [loadedUserId, setLoadedUserId] = useState<string | null>(null)
+  const openedBookingRef = useRef<string | null>(null)
   const [clock, setClock] = useState(() => Date.now())
   const local = useMemo(() => JSON.parse(localStorage.getItem('coachconnect-demo-bookings') || '[]') as LocalBooking[], [])
   const refresh = async () => {
@@ -1961,6 +2081,7 @@ export function Account({ onAuth }: { onAuth: () => void }) {
     setRemote(nextRemote)
     setPackages(nextPackages)
     setLoadedUserId(user.id)
+    void api<PendingFeedbackResponse>('/api/v1/feedback/pending?perspective=consumer').then((feedback) => { setReward(feedback.reward); setPendingFeedback(feedback.items) }).catch(() => undefined)
   }
   useEffect(() => {
     if (!user) return
@@ -1976,8 +2097,18 @@ export function Account({ onAuth }: { onAuth: () => void }) {
       setPackages(nextPackages)
       setLoadedUserId(user.id)
     })
+    void api<PendingFeedbackResponse>('/api/v1/feedback/pending?perspective=consumer').then((feedback) => { if (current) { setReward(feedback.reward); setPendingFeedback(feedback.items) } }).catch(() => undefined)
     return () => { current = false }
   }, [user])
+  useEffect(() => {
+    const bookingId = accountSearch.get('booking')
+    if (!bookingId || openedBookingRef.current === bookingId || !remote.length) return
+    const booking = remote.find((item) => item.id === bookingId)
+    if (booking) {
+      openedBookingRef.current = bookingId
+      setActiveBookingDetails(booking)
+    }
+  }, [accountSearch, remote])
   useEffect(() => {
     const interval = window.setInterval(() => setClock(Date.now()), 60000)
     return () => window.clearInterval(interval)
@@ -2019,6 +2150,37 @@ export function Account({ onAuth }: { onAuth: () => void }) {
       </div>
       <AccountNavigation active="profile" />
       {profile && <AccountIdentity profile={profile} userId={user.id} onSaved={setProfile} />}
+      {reward && <section className={`client-reward-card tier-${reward.tier}`} id="cliente-rewards">
+        <div className="client-reward-badge"><BadgeCheck /><span>{rewardLabels[reward.tier]}</span></div>
+        <div>
+          <p className="eyebrow">Cliente que aporta confianza</p>
+          <h2>{reward.tier === 'standard' ? 'Tu primera insignia está en camino.' : `Nivel ${rewardLabels[reward.tier]}`}</h2>
+          <p>{reward.qualifying_review_count} entrenamientos valorados · comisión para el entrenador: {reward.effective_platform_fee_percent}% en tus próximas compras.</p>
+          {reward.next_tier_at && <progress value={reward.qualifying_review_count} max={reward.next_tier_at} aria-label={`Progreso al siguiente nivel: ${reward.qualifying_review_count} de ${reward.next_tier_at}`} />}
+          <small>{reward.next_tier_at ? `Te faltan ${reward.next_tier_at - reward.qualifying_review_count} valoraciones válidas para el siguiente nivel.` : 'Has alcanzado el nivel máximo.'}</small>
+        </div>
+      </section>}
+      {pendingFeedback.length > 0 && <section className="pending-feedback-manager client-pending-feedback" aria-labelledby="client-pending-feedback-title">
+        <div>
+          <p className="eyebrow">Acciones pendientes</p>
+          <h2 id="client-pending-feedback-title">Termina de cerrar tus entrenamientos.</h2>
+          <p>Tienes {pendingFeedback.length === 1 ? 'una sesión pendiente' : `${pendingFeedback.length} sesiones pendientes`} de confirmar o valorar.</p>
+        </div>
+        {pendingFeedback.map((item) => <article key={item.booking.id}>
+          <button className="pending-feedback-main" onClick={() => setActiveBookingDetails(item.booking)}>
+            <CalendarDays />
+            <span>
+              <strong>{item.booking.coach_services?.name || 'Sesión de entrenamiento'}</strong>
+              <small>{item.booking.coach_profiles?.profiles?.display_name || 'Entrenador CoachConnect'} · {new Date(item.booking.starts_at).toLocaleString('es-ES', { dateStyle: 'medium', timeStyle: 'short' })}</small>
+            </span>
+            <ArrowRight />
+          </button>
+          <div>
+            {item.needs_outcome && <Button onClick={() => setActiveOutcome(item.booking)}>Confirmar resultado</Button>}
+            {item.needs_review && <button className="text-button visible-text-button" onClick={() => setActiveReview(item.booking)}><Star /> Valorar entrenador</button>}
+          </div>
+        </article>)}
+      </section>}
       {profile?.role === 'coach' && <div className="booking-perspective-note"><UserRound /><span><strong>Estas son tus reservas como cliente.</strong> Las sesiones que impartes están separadas en el <Link to="/profesional">panel profesional</Link>.</span></div>}
       {packages.some((item) => item.status === 'active' && item.offer_type !== 'recurring_plan' && (item.session_credits?.some((credit: any) => credit.status === 'available') || item.used_sessions < item.total_sessions)) && (
         <a className="package-reminder" href="#mis-bonos">
@@ -2186,7 +2348,7 @@ export function Account({ onAuth }: { onAuth: () => void }) {
       {activeReview && <ReviewDialog booking={activeReview} isCoach={false} onClose={() => setActiveReview(null)} onSaved={refresh} />}
       {activeOutcome && <OutcomeDialog booking={activeOutcome} onClose={() => setActiveOutcome(null)} onSaved={refresh} />}
       {activeCancellation && <CancellationDialog booking={activeCancellation} onClose={() => setActiveCancellation(null)} onConfirm={(reason) => cancelBooking(activeCancellation.id, reason)} />}
-      {activeBookingDetails && <BookingDetailsDialog booking={activeBookingDetails} perspective="consumer" onClose={() => setActiveBookingDetails(null)} />}
+      {activeBookingDetails && <BookingDetailsDialog booking={activeBookingDetails} perspective="consumer" currentUserId={user.id} onClose={() => setActiveBookingDetails(null)} onSaved={() => { setActiveBookingDetails(null); void refresh() }} />}
     </section>
   )
 }
@@ -2198,6 +2360,8 @@ function Messages({ onAuth }: { onAuth: () => void }) {
   const [blockedUsers, setBlockedUsers] = useState<BlockedUserRecord[]>([])
   const [active, setActive] = useState<string | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [conversationsLoading, setConversationsLoading] = useState(true)
+  const [messagesLoading, setMessagesLoading] = useState(false)
   const [body, setBody] = useState('')
   const [busy, setBusy] = useState(false)
   const [loadError, setLoadError] = useState('')
@@ -2205,25 +2369,37 @@ function Messages({ onAuth }: { onAuth: () => void }) {
   const [reportContext, setReportContext] = useState<{ messageId?: string } | null>(null)
   useEffect(() => {
     if (!user) return
+    let current = true
+    setConversationsLoading(true)
     Promise.all([api<ConversationRecord[]>('/api/v1/conversations'), api<BlockedUserRecord[]>('/api/v1/blocks')])
       .then(([rows, blocks]) => {
+        if (!current) return
         setConversations(rows)
         setBlockedUsers(blocks)
         const requested = search.get('conversation')
         setActive(rows.find((item) => item.id === requested)?.id || rows[0]?.id || null)
         setLoadError('')
       })
-      .catch((error) => setLoadError(error instanceof Error ? error.message : 'No se pudieron cargar las conversaciones'))
+      .catch((error) => { if (current) setLoadError(error instanceof Error ? error.message : 'No se pudieron cargar las conversaciones') })
+      .finally(() => { if (current) setConversationsLoading(false) })
+    return () => { current = false }
   }, [user])
   useEffect(() => {
-    if (!active) return
+    if (!active) {
+      setMessagesLoading(false)
+      return
+    }
+    let current = true
+    setMessagesLoading(true)
     setMessages([])
     api<ChatMessage[]>(`/api/v1/conversations/${active}/messages`)
       .then((rows) => {
+        if (!current) return
         setMessages(rows)
         setLoadError('')
       })
-      .catch((error) => setLoadError(error instanceof Error ? error.message : 'No se pudieron cargar los mensajes'))
+      .catch((error) => { if (current) setLoadError(error instanceof Error ? error.message : 'No se pudieron cargar los mensajes') })
+      .finally(() => { if (current) setMessagesLoading(false) })
     const channel = supabase
       .channel(`conversation:${active}`)
       .on(
@@ -2238,6 +2414,7 @@ function Messages({ onAuth }: { onAuth: () => void }) {
       )
       .subscribe()
     return () => {
+      current = false
       void supabase.removeChannel(channel)
     }
   }, [active])
@@ -2410,7 +2587,7 @@ function Messages({ onAuth }: { onAuth: () => void }) {
       <div className="inbox">
         <aside>
           <div className="inbox-list-label"><span>Conversaciones</span><strong>{conversations.length}</strong></div>
-          {conversations.map((item) => {
+          {conversationsLoading ? <LoadingBlock label="Cargando conversaciones" /> : conversations.map((item) => {
             const other = item.consumer_id === user.id ? item.coach : item.consumer
             return (
               <button className={active === item.id ? 'active' : ''} key={item.id} onClick={() => chooseConversation(item.id)}>
@@ -2420,7 +2597,7 @@ function Messages({ onAuth }: { onAuth: () => void }) {
               </button>
             )
           })}
-          {!conversations.length && <p>Aún no tienes conversaciones.</p>}
+          {!conversationsLoading && !conversations.length && <p>Aún no tienes conversaciones.</p>}
         </aside>
         <div className="conversation">
           {active ? (
@@ -2440,7 +2617,7 @@ function Messages({ onAuth }: { onAuth: () => void }) {
                 <div className="chat-restriction-banner"><MessageSquareOff /><div><strong>Mensajería detenida</strong><span>{activeConversation?.blocked_by_me ? 'Has bloqueado a esta persona. Desbloquéala para volver a conversar.' : 'No es posible intercambiar mensajes con esta persona.'}</span></div></div>
               )}
               <div className="chat-messages">
-                {messages.map((item) => (
+                {messagesLoading ? <LoadingBlock label="Cargando mensajes" /> : messages.map((item) => (
                   <div className={`message ${item.sender_id === user.id ? 'outgoing' : 'incoming'} ${item.delivery_status === 'sending' ? 'sending' : ''}`} key={item.id}>
                     {item.body}
                     {item.attachment_path && <button className="attachment-link" onClick={() => openAttachment(item.attachment_path || '')}><Paperclip /> Abrir archivo</button>}
@@ -2448,6 +2625,7 @@ function Messages({ onAuth }: { onAuth: () => void }) {
                     {item.sender_id !== user.id && <button className="message-report-button" onClick={() => setReportContext({ messageId: item.id })} aria-label="Denunciar este mensaje"><Flag /></button>}
                   </div>
                 ))}
+                {!messagesLoading && !messages.length && <p className="chat-empty-state">Todavía no hay mensajes en esta conversación.</p>}
               </div>
               <form className={`chat-composer ${messagingUnavailable ? 'disabled' : ''}`} onSubmit={send}>
                 <label className="attachment-button" aria-label="Adjuntar archivo"><Paperclip /><input type="file" accept=".pdf,image/jpeg,image/png,image/webp" onChange={attach} disabled={messagingUnavailable || busy} /></label>
@@ -2455,7 +2633,7 @@ function Messages({ onAuth }: { onAuth: () => void }) {
                 <button type="submit" aria-label="Enviar" disabled={busy || messagingUnavailable || !body.trim()}>{busy ? <LoaderCircle className="spin" /> : <Send />}</button>
               </form>
             </>
-          ) : <Empty title="Elige una conversación." copy="Tus mensajes aparecerán aquí." />}
+          ) : conversationsLoading ? <LoadingBlock label="Preparando tu bandeja" /> : <Empty title="Elige una conversación." copy="Tus mensajes aparecerán aquí." />}
         </div>
       </div>
       {reportContext && (
@@ -2480,11 +2658,19 @@ function Messages({ onAuth }: { onAuth: () => void }) {
 function Notifications({ onAuth }: { onAuth: () => void }) {
   const { user, loading } = useAuth()
   const [items, setItems] = useState<any[]>([])
+  const [itemsLoading, setItemsLoading] = useState(true)
+  const [loadError, setLoadError] = useState('')
   useEffect(() => {
-    if (!user) return
+    if (!user) {
+      setItemsLoading(false)
+      return
+    }
+    setItemsLoading(true)
+    setLoadError('')
     api<any[]>('/api/v1/notifications')
       .then(setItems)
-      .catch(() => undefined)
+      .catch((error) => setLoadError(error instanceof Error ? error.message : 'No se pudieron cargar las notificaciones'))
+      .finally(() => setItemsLoading(false))
     const channel = supabase
       .channel(`notifications:${user.id}`)
       .on(
@@ -2520,7 +2706,7 @@ function Notifications({ onAuth }: { onAuth: () => void }) {
         </div>
       </div>
       <div className="notification-list">
-        {items.map((item) => (
+        {itemsLoading ? <LoadingBlock label="Cargando notificaciones" /> : items.map((item) => (
           <button key={item.id} className={item.read_at ? 'read' : 'unread'} onClick={() => open(item)}>
             <Bell />
             <span>
@@ -2530,7 +2716,8 @@ function Notifications({ onAuth }: { onAuth: () => void }) {
             <time>{new Date(item.created_at).toLocaleString('es-ES')}</time>
           </button>
         ))}
-        {!items.length && <Empty title="Todo al día." copy="Aquí aparecerán mensajes, reservas y cambios importantes." />}
+        {loadError && !itemsLoading && <p className="form-error" role="alert">{loadError}</p>}
+        {!itemsLoading && !loadError && !items.length && <Empty title="Todo al día." copy="Aquí aparecerán mensajes, reservas y cambios importantes." />}
       </div>
     </section>
   )
@@ -2694,6 +2881,8 @@ function ProOverview({ profile, userId, onTab, data }: { profile: Profile | null
 function BookingRequestsPanel() {
   const [items, setItems] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
+  const [pendingDecision, setPendingDecision] = useState<{ item: any; decision: 'accept' | 'reject' } | null>(null)
+  const [decisionBusy, setDecisionBusy] = useState(false)
   const load = () =>
     api<any[]>('/api/v1/coach/booking-requests')
       .then(setItems)
@@ -2703,6 +2892,7 @@ function BookingRequestsPanel() {
     load()
   }, [])
   const decide = async (id: string, decision: 'accept' | 'reject') => {
+    setDecisionBusy(true)
     try {
       await api(`/api/v1/coach/booking-requests/${id}/decision`, {
         method: 'POST',
@@ -2712,10 +2902,11 @@ function BookingRequestsPanel() {
         }),
       })
       toast.success(decision === 'accept' ? 'Solicitud aceptada y pago capturado' : 'Solicitud rechazada y autorización liberada')
+      setPendingDecision(null)
       load()
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'No se pudo responder')
-    }
+    } finally { setDecisionBusy(false) }
   }
   if (loading) return <LoadingBlock label="Cargando solicitudes" />
   return (
@@ -2744,16 +2935,18 @@ function BookingRequestsPanel() {
                   <ShieldCheck /> {summary?.reliability_percent != null ? `${summary.reliability_percent}% asistencia` : 'Sin historial suficiente'}
                 </span>
                 <span>{summary?.completed_sessions || 0} sesiones completadas</span>
+                {item.client_reward && item.client_reward.tier !== 'standard' && <span className={`client-tier tier-${item.client_reward.tier}`}><BadgeCheck /> Cliente {rewardLabels[item.client_reward.tier as ClientReward['tier']]}</span>}
               </div>
               <p>
                 {service?.name || 'Oferta de entrenamiento'}
                 {item.booking_packages?.total_sessions ? ` · ${item.booking_packages.total_sessions} sesiones` : ''}
                 {item.bookings?.starts_at ? ` · ${new Date(item.bookings.starts_at).toLocaleString('es-ES')}` : ''}
               </p>
+              {item.payment_terms && <small className="request-fee-note">Comisión fijada para esta compra: {Number(item.payment_terms.platform_fee_rate_bps) / 100}%.</small>}
               {item.status === 'awaiting_coach' && (
                 <div className="request-actions">
-                  <Button onClick={() => decide(item.id, 'accept')}>Aceptar y capturar</Button>
-                  <button className="danger-action" onClick={() => decide(item.id, 'reject')}>
+                  <Button onClick={() => setPendingDecision({ item, decision: 'accept' })}>Aceptar y capturar</Button>
+                  <button className="danger-action" onClick={() => setPendingDecision({ item, decision: 'reject' })}>
                     Rechazar
                   </button>
                 </div>
@@ -2763,24 +2956,54 @@ function BookingRequestsPanel() {
         })}
         {!items.length && <Empty title="Sin solicitudes pendientes." copy="Cuando una oferta requiera aprobación, aparecerá aquí con su plazo y la reputación conductual del cliente." />}
       </div>
+      {pendingDecision && <ConfirmDialog
+        kind="decision"
+        title={pendingDecision.decision === 'accept' ? '¿Aceptar esta solicitud?' : '¿Rechazar esta solicitud?'}
+        copy={pendingDecision.decision === 'accept'
+          ? `Confirmarás la sesión con ${pendingDecision.item.client?.display_name || 'este cliente'} y capturarás el pago autorizado. La fecha quedará comprometida en tu agenda.`
+          : `Liberarás la autorización de pago de ${pendingDecision.item.client?.display_name || 'este cliente'} y los horarios volverán a estar disponibles.`}
+        confirmLabel={pendingDecision.decision === 'accept' ? 'Sí, aceptar y capturar' : 'Sí, rechazar y liberar'}
+        busy={decisionBusy}
+        onCancel={() => setPendingDecision(null)}
+        onConfirm={() => void decide(pendingDecision.item.id, pendingDecision.decision)}
+      />}
     </section>
   )
 }
 
 function CoachReviewsPanel() {
+  const { user } = useAuth()
+  const [portalSearch] = useSearchParams()
   const [data, setData] = useState<{ summary: any; items: any[] }>({
     summary: null,
     items: [],
   })
+  const [pending, setPending] = useState<PendingFeedbackItem[]>([])
+  const [activeDetails, setActiveDetails] = useState<BookingRecord | null>(null)
+  const [activeOutcome, setActiveOutcome] = useState<BookingRecord | null>(null)
+  const [activeReview, setActiveReview] = useState<BookingRecord | null>(null)
   const [loading, setLoading] = useState(true)
   const load = () =>
-    api<{ summary: any; items: any[] }>('/api/v1/coach/reviews')
-      .then(setData)
-      .catch((error) => toast.error(error instanceof Error ? error.message : 'No se pudieron cargar las valoraciones'))
+    Promise.all([
+      api<{ summary: any; items: any[] }>('/api/v1/coach/reviews').catch((error) => {
+        toast.error(error instanceof Error ? error.message : 'No se pudieron cargar las valoraciones')
+        return { summary: null, items: [] }
+      }),
+      api<PendingFeedbackResponse>('/api/v1/feedback/pending?perspective=coach').catch((error) => {
+        toast.error(error instanceof Error ? error.message : 'No se pudieron cargar las sesiones pendientes')
+        return { items: [], reward: { qualifying_review_count: 0, tier: 'standard' as const, commission_discount_bps: 0, effective_platform_fee_percent: 15, next_tier_at: 10 } }
+      }),
+    ])
+      .then(([reviews, feedback]) => { setData(reviews); setPending(feedback.items) })
       .finally(() => setLoading(false))
   useEffect(() => {
     load()
   }, [])
+  useEffect(() => {
+    const bookingId = portalSearch.get('booking')
+    const target = pending.find((item) => item.booking.id === bookingId)
+    if (target) setActiveDetails(target.booking)
+  }, [pending, portalSearch])
   const reply = async (review: any) => {
     const body = window.prompt('Escribe una respuesta pública, respetuosa y definitiva')
     if (!body) return
@@ -2802,6 +3025,20 @@ function CoachReviewsPanel() {
     <section className="coach-reviews-panel">
       <p className="eyebrow">Reputación verificada</p>
       <h2 className="form-title">Lo que dicen tus clientes.</h2>
+      {pending.length > 0 && <section className="pending-feedback-manager">
+        <div><p className="eyebrow">Sesiones pendientes de gestionar</p><h3>Confirma y valora desde aquí.</h3></div>
+        {pending.map((item) => <article key={item.booking.id}>
+          <button className="pending-feedback-main" onClick={() => setActiveDetails(item.booking)}>
+            <CalendarDays />
+            <span><strong>{item.booking.profiles?.display_name || 'Cliente CoachConnect'}</strong><small>{item.booking.coach_services?.name} · {new Date(item.booking.starts_at).toLocaleString('es-ES', { dateStyle: 'medium', timeStyle: 'short' })}</small></span>
+            <ArrowRight />
+          </button>
+          <div>
+            {item.needs_outcome && <Button onClick={() => setActiveOutcome(item.booking)}>Confirmar resultado</Button>}
+            {item.needs_review && <button className="text-button visible-text-button" onClick={() => setActiveReview(item.booking)}><Star /> Valorar cliente</button>}
+          </div>
+        </article>)}
+      </section>}
       <div className="reputation-dashboard">
         <div>
           <span>Estrellas</span>
@@ -2855,6 +3092,9 @@ function CoachReviewsPanel() {
         ))}
         {!data.items.length && <Empty title="Todavía no hay valoraciones reveladas." copy="Las nuevas valoraciones permanecen ocultas hasta que ambas partes respondan o se cumplan 14 días." />}
       </div>
+      {activeDetails && <BookingDetailsDialog booking={activeDetails} perspective="coach" currentUserId={user?.id} onClose={() => setActiveDetails(null)} onSaved={() => { setActiveDetails(null); void load() }} />}
+      {activeOutcome && <OutcomeDialog booking={activeOutcome} onClose={() => setActiveOutcome(null)} onSaved={() => { setActiveOutcome(null); void load() }} />}
+      {activeReview && <ReviewDialog booking={activeReview} isCoach onClose={() => setActiveReview(null)} onSaved={() => { setActiveReview(null); void load() }} />}
     </section>
   )
 }
@@ -2879,6 +3119,12 @@ function ServicesForm() {
   const [availableStartTime, setAvailableStartTime] = useState('09:00')
   const [availableEndTime, setAvailableEndTime] = useState('19:00')
   const [bookingWindowDays, setBookingWindowDays] = useState(60)
+  const [bookingMode, setBookingMode] = useState<'instant' | 'request'>('instant')
+  const [requestNoticeHours, setRequestNoticeHours] = useState(36)
+  const [editorTarget, setEditorTarget] = useState<HTMLElement | null>(null)
+  useEffect(() => {
+    setEditorTarget(editing && formOpen ? document.getElementById(`service-editor-${editing.id}`) : null)
+  }, [editing, formOpen])
   useEffect(() => {
     api<CoachServiceRecord[]>('/api/v1/coach/services')
       .then((items) => {
@@ -2919,7 +3165,9 @@ function ServicesForm() {
       duration_minutes: Number(form.get('duration_minutes')),
       price_cents: Math.round(Number(form.get('price')) * 100),
       offer_type: offerType,
-      booking_mode: form.get('booking_mode'),
+      booking_mode: bookingMode,
+      acceptance_window_hours: editing?.acceptance_window_hours || 12,
+      request_booking_notice_minutes: requestNoticeHours * 60,
       package_size: packageSize,
       expiry_days: expiryDays,
       cadence_weeks: cadenceWeeks,
@@ -2964,6 +3212,8 @@ function ServicesForm() {
     setAvailableStartTime(item.available_start_time?.slice(0, 5) || '00:00')
     setAvailableEndTime(item.available_end_time?.slice(0, 5) || '23:59')
     setBookingWindowDays(item.booking_window_days || 31)
+    setBookingMode(item.booking_mode || 'instant')
+    setRequestNoticeHours(Math.round((item.request_booking_notice_minutes || 2160) / 60))
     setFormOpen(true)
   }
   const create = () => {
@@ -2974,6 +3224,8 @@ function ServicesForm() {
     setAvailableStartTime('09:00')
     setAvailableEndTime('19:00')
     setBookingWindowDays(60)
+    setBookingMode('instant')
+    setRequestNoticeHours(36)
     setFormOpen(true)
   }
   if (!loaded) return <LoadingBlock label="Cargando tus servicios" />
@@ -2997,6 +3249,7 @@ function ServicesForm() {
         </p>
       )}
       {formOpen && (
+        <PortalTo target={editing ? editorTarget : null} waitForTarget={Boolean(editing)}>
         <div className="service-editor">
           <ProForm key={editing?.id || 'new-service'} title={editing ? 'Editar servicio' : 'Nuevo servicio'} intro="Define primero la experiencia y después sus reglas de reserva. Las compras existentes no cambiarán." onSubmit={submit}>
             <div className="service-form-section wide"><span>01</span><div><strong>Modelo de venta</strong><small>Sesión suelta, bono o plan con varias fechas.</small></div></div>
@@ -3010,11 +3263,18 @@ function ServicesForm() {
             </label>
             <label>
               Forma de reserva
-              <select name="booking_mode" defaultValue={editing?.booking_mode || 'instant'}>
+              <select name="booking_mode" value={bookingMode} onChange={(event) => setBookingMode(event.target.value as typeof bookingMode)}>
                 <option value="instant">Reserva inmediata</option>
                 <option value="request">Solicitud con aprobación</option>
               </select>
             </label>
+            {bookingMode === 'request' && (
+              <label>
+                Antelación mínima para solicitar (horas)
+                <input type="number" min={editing?.acceptance_window_hours || 12} max="168" step="1" value={requestNoticeHours} onChange={(event) => setRequestNoticeHours(Number(event.target.value))} required />
+                <small>El cliente solo podrá solicitar sesiones que empiecen después de este plazo. Antes era fijo en 36 horas.</small>
+              </label>
+            )}
             <div className="service-form-section wide"><span>02</span><div><strong>Contenido y precio</strong><small>Lo que verá el cliente al comparar tus opciones.</small></div></div>
             <label>
               Especialidad
@@ -3091,8 +3351,8 @@ function ServicesForm() {
               <small>Estos días deben estar también activos en tu Agenda general.</small>
             </fieldset>
             <div className="time-range service-time-range wide">
-              <label>Disponible desde<input aria-label="Hora inicial del servicio" type="time" value={availableStartTime} onChange={(event) => setAvailableStartTime(event.target.value)} required /></label>
-              <label>Disponible hasta<input aria-label="Hora final del servicio" type="time" value={availableEndTime} onChange={(event) => setAvailableEndTime(event.target.value)} required /></label>
+              <label>Disponible desde<Time24Field label="Hora inicial del servicio" value={availableStartTime} onChange={setAvailableStartTime} /></label>
+              <label>Disponible hasta<Time24Field label="Hora final del servicio" value={availableEndTime} onChange={setAvailableEndTime} /></label>
               <small>Esta franja se cruza con tu horario general; el cliente solo verá las horas que cumplan ambos.</small>
             </div>
             <label>
@@ -3122,11 +3382,13 @@ function ServicesForm() {
             </div>
           </ProForm>
         </div>
+        </PortalTo>
       )}
       {services.length > 0 ? (
         <div className="service-manager-list">
           {services.map((item) => (
-            <article key={item.id}>
+            <Fragment key={item.id}>
+            <article>
               <div className="service-manager-icon">{item.package_size > 1 ? <span>{item.package_size}×</span> : <CalendarDays />}</div>
               <div className="service-manager-copy">
                 <div>
@@ -3142,6 +3404,7 @@ function ServicesForm() {
                   <span>{formatServiceWeekdays(item.available_weekdays || [0, 1, 2, 3, 4, 5, 6])}</span>
                   <span>{formatServiceHours(item.available_start_time, item.available_end_time)}</span>
                   <span>Hasta {item.booking_window_days || 31} días</span>
+                  {item.booking_mode === 'request' && <span>Solicitable con {Math.round((item.request_booking_notice_minutes || 2160) / 60)} h de antelación</span>}
                   <strong>
                     {(item.price_cents / 100).toLocaleString('es-ES', {
                       style: 'currency',
@@ -3159,6 +3422,8 @@ function ServicesForm() {
                 </button>
               </div>
             </article>
+            {editing?.id === item.id && <div id={`service-editor-${item.id}`} className="service-editor-anchor" />}
+            </Fragment>
           ))}
         </div>
       ) : (
@@ -3169,6 +3434,7 @@ function ServicesForm() {
 }
 
 function AvailabilityForm() {
+  const { user } = useAuth()
   const days = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
   const [schedule, setSchedule] = useState(() => days.map((_, weekday) => ({
     weekday,
@@ -3186,6 +3452,11 @@ function AvailabilityForm() {
   const [calendarLoading, setCalendarLoading] = useState(true)
   const [calendarError, setCalendarError] = useState('')
   const [selectedBooking, setSelectedBooking] = useState<BookingRecord | null>(null)
+  const [calendarRefreshToken, setCalendarRefreshToken] = useState(0)
+  const [exceptionStartDate, setExceptionStartDate] = useState('')
+  const [exceptionStartTime, setExceptionStartTime] = useState('09:00')
+  const [exceptionEndDate, setExceptionEndDate] = useState('')
+  const [exceptionEndTime, setExceptionEndTime] = useState('10:00')
   useEffect(() => {
     api<{ rules: any[]; exceptions: any[] }>('/api/v1/coach/availability')
       .then((data) => {
@@ -3211,7 +3482,7 @@ function AvailabilityForm() {
       .then((data) => { setCalendarBookings(data.bookings); setCalendarExceptions(data.exceptions); setCalendarError('') })
       .catch((error) => setCalendarError(error instanceof Error ? error.message : 'No pudimos cargar el calendario'))
       .finally(() => setCalendarLoading(false))
-  }, [calendarDate, calendarView])
+  }, [calendarDate, calendarView, calendarRefreshToken])
   const save = async () => {
     const invalidDay = schedule.find((day) => day.enabled && day.endsAt <= day.startsAt)
     if (invalidDay) return toast.error(`La hora final del ${days[invalidDay.weekday].toLowerCase()} debe ser posterior a la inicial.`)
@@ -3224,7 +3495,7 @@ function AvailabilityForm() {
       toast.success('Disponibilidad y condiciones actualizadas')
     } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo guardar') }
   }
-  const addException = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const formElement = event.currentTarget; const form = new FormData(formElement); const available = form.get('kind') === 'available'; try { const item = await api<any>('/api/v1/coach/availability/exceptions', { method: 'POST', body: JSON.stringify({ starts_at: new Date(String(form.get('starts_at'))).toISOString(), ends_at: new Date(String(form.get('ends_at'))).toISOString(), available, label: form.get('label') }) }); setExceptions((current) => [...current, item]); setCalendarExceptions((current) => [...current, item]); formElement.reset(); toast.success(available ? 'Disponibilidad puntual añadida' : 'Bloqueo añadido') } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo añadir') } }
+  const addException = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const formElement = event.currentTarget; const form = new FormData(formElement); const available = form.get('kind') === 'available'; const startsAt = new Date(`${exceptionStartDate}T${exceptionStartTime}`); const endsAt = new Date(`${exceptionEndDate}T${exceptionEndTime}`); if (!exceptionStartDate || !exceptionEndDate || endsAt <= startsAt) return toast.error('La fecha y hora final debe ser posterior a la inicial.'); try { const item = await api<any>('/api/v1/coach/availability/exceptions', { method: 'POST', body: JSON.stringify({ starts_at: startsAt.toISOString(), ends_at: endsAt.toISOString(), available, label: form.get('label') }) }); setExceptions((current) => [...current, item]); setCalendarExceptions((current) => [...current, item]); formElement.reset(); setExceptionStartDate(''); setExceptionEndDate(''); setExceptionStartTime('09:00'); setExceptionEndTime('10:00'); toast.success(available ? 'Disponibilidad puntual añadida' : 'Bloqueo añadido') } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo añadir') } }
   const removeException = async (id: string) => { try { await api(`/api/v1/coach/availability/exceptions/${id}`, { method: 'DELETE' }); setExceptions((current) => current.filter((item) => item.id !== id)); setCalendarExceptions((current) => current.filter((item) => item.id !== id)); toast.success('Bloqueo eliminado') } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo eliminar') } }
   const toggleRespondsNow = async () => { const enabled = !respondsNow; try { await api('/api/v1/coach/responds-now', { method: 'PATCH', body: JSON.stringify({ enabled }) }); setRespondsNow(enabled) } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo actualizar') } }
   const visibleDays = calendarDaysFor(calendarView, calendarDate)
@@ -3241,17 +3512,23 @@ function AvailabilityForm() {
     <section className={`week-calendar calendar-${calendarView}`} aria-label={`Calendario ${calendarView === 'day' ? 'diario' : calendarView === 'week' ? 'semanal' : 'mensual'} de sesiones`}>
       <header><div><p className="eyebrow">{calendarView === 'day' ? 'Día' : calendarView === 'week' ? 'Semana' : 'Mes'}</p><h3>{calendarTitle}</h3></div><div className="calendar-toolbar"><div className="calendar-view-tabs" role="group" aria-label="Visualización del calendario">{([['day', 'Día'], ['week', 'Semana'], ['month', 'Mes']] as const).map(([view, label]) => <button type="button" className={calendarView === view ? 'active' : ''} aria-pressed={calendarView === view} onClick={() => setCalendarView(view)} key={view}>{label}</button>)}</div><div className="calendar-controls"><button aria-label="Periodo anterior" onClick={() => moveCalendar(-1)}><ChevronLeft /></button><button onClick={() => setCalendarDate(startOfDay(new Date()))}>Hoy</button><button aria-label="Periodo siguiente" onClick={() => moveCalendar(1)}><ChevronRight /></button></div></div></header>
       {calendarError && <p className="form-error" role="alert">{calendarError}</p>}
+      {calendarView === 'month' && <div className="calendar-weekday-row" aria-hidden="true">{['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo'].map((day) => <span key={day}>{day}</span>)}</div>}
       {calendarLoading ? <LoadingBlock label="Cargando el calendario" /> : <div className="week-grid">{visibleDays.map((date) => {
-        const dayBookings = calendarBookings.filter((item) => new Date(item.starts_at).toDateString() === date.toDateString())
-        const dayExceptions = calendarExceptions.filter((item) => new Date(item.starts_at).toDateString() === date.toDateString())
-        const today = date.toDateString() === new Date().toDateString()
         const outsideMonth = calendarView === 'month' && date.getMonth() !== calendarDate.getMonth()
+        const dayBookings = outsideMonth ? [] : calendarBookings.filter((item) => new Date(item.starts_at).toDateString() === date.toDateString())
+        const dayExceptions = outsideMonth ? [] : calendarExceptions.filter((item) => new Date(item.starts_at).toDateString() === date.toDateString())
+        const today = date.toDateString() === new Date().toDateString()
         return <article className={`${today ? 'today' : ''} ${outsideMonth ? 'outside-month' : ''}`} key={date.toISOString()}><div className="week-day-head"><span>{date.toLocaleDateString('es-ES', { weekday: 'short' }).replace('.', '')}</span><strong>{date.getDate()}</strong></div><div className="week-events">{dayBookings.map((item) => <button type="button" className={`calendar-event status-${item.status.replaceAll('_', '-')}`} key={item.id} onClick={() => setSelectedBooking(item)} aria-label={`Ver detalles de ${item.coach_services?.name || 'la sesión'} con ${item.profiles?.display_name || 'el cliente'}`}><time>{new Date(item.starts_at).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</time><strong>{item.coach_services?.name || 'Sesión'}</strong><span>{item.profiles?.display_name || 'Cliente'}</span><small>{statusLabel[item.status] || item.status}</small></button>)}{dayExceptions.map((item) => <div className={`calendar-event ${item.available ? 'available-extra' : 'blocked'}`} key={item.id}><time>{new Date(item.starts_at).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</time><strong>{item.label || (item.available ? 'Disponibilidad puntual' : 'Bloqueo')}</strong><small>{item.available ? 'Disponible extra' : 'No disponible'}</small></div>)}{!dayBookings.length && !dayExceptions.length && <span className="calendar-empty">Sin sesiones</span>}</div></article>
       })}</div>}
     </section>
-    <section className="availability-settings"><div><p className="eyebrow">Horario recurrente</p><h3>Cuándo pueden reservarte</h3><p>Activa tus días habituales y define una franja distinta para cada uno. El horario de cada servicio se cruzará con esta agenda general.</p></div><div className="booking-policy-setting"><div><Clock3 /><span><strong>Margen mínimo de reserva</strong><small>Se mostrará en tu perfil y se aplicará a todos tus servicios.</small></span></div><select aria-label="Margen mínimo de reserva" value={minBookingNotice} onChange={(event) => setMinBookingNotice(Number(event.target.value))}><option value="0">Sin margen mínimo</option><option value="30">30 minutos</option><option value="60">1 hora</option><option value="120">2 horas</option><option value="360">6 horas</option><option value="720">12 horas</option><option value="1440">1 día</option><option value="2880">2 días</option><option value="10080">1 semana</option></select></div><div className="availability-day-list">{schedule.map((item) => <div className={item.enabled ? 'availability-day-row active' : 'availability-day-row'} key={item.weekday}><button type="button" className="availability-day-toggle" aria-pressed={item.enabled} onClick={() => setSchedule((current) => current.map((day) => day.weekday === item.weekday ? { ...day, enabled: !day.enabled } : day))}><span>{days[item.weekday]}</span><Check /></button><label>Desde<input aria-label={`Desde el ${days[item.weekday].toLowerCase()}`} type="time" value={item.startsAt} disabled={!item.enabled} onChange={(event) => setSchedule((current) => current.map((day) => day.weekday === item.weekday ? { ...day, startsAt: event.target.value } : day))} /></label><label>Hasta<input aria-label={`Hasta el ${days[item.weekday].toLowerCase()}`} type="time" value={item.endsAt} disabled={!item.enabled} onChange={(event) => setSchedule((current) => current.map((day) => day.weekday === item.weekday ? { ...day, endsAt: event.target.value } : day))} /></label></div>)}</div><Button onClick={save}>Guardar disponibilidad</Button></section>
-    <form className="exception-form" onSubmit={addException}><div><p className="eyebrow">Fechas concretas</p><h3>Días sueltos y bloqueos</h3><p>Añade horas extra fuera de tu rutina o marca vacaciones y ausencias.</p></div><label>Tipo<select name="kind" defaultValue="available"><option value="available">Disponibilidad puntual</option><option value="blocked">Bloqueo / no disponible</option></select></label><label>Desde<input name="starts_at" type="datetime-local" required /></label><label>Hasta<input name="ends_at" type="datetime-local" required /></label><label>Motivo<input name="label" placeholder="Clase especial, vacaciones…" /></label><Button type="submit">Añadir fecha</Button></form><div className="compact-list exception-list">{exceptions.map((item) => <div key={item.id}><div><strong>{item.label || (item.available ? 'Disponibilidad puntual' : 'Bloqueo')}</strong><span>{item.available ? 'Disponible' : 'No disponible'} · {new Date(item.starts_at).toLocaleString('es-ES')} — {new Date(item.ends_at).toLocaleString('es-ES')}</span></div><button className="danger-action" onClick={() => removeException(item.id)}>Eliminar</button></div>)}</div>
-    {selectedBooking && <BookingDetailsDialog booking={selectedBooking} perspective="coach" onClose={() => setSelectedBooking(null)} />}
+    <section className="availability-settings">
+      <div><p className="eyebrow">Horario recurrente</p><h3>Cuándo pueden reservarte</h3><p>Activa tus días habituales y define una franja distinta para cada uno. El horario de cada servicio se cruzará con esta agenda general.</p></div>
+      <div className="booking-policy-setting"><div><Clock3 /><span><strong>Margen mínimo de reserva</strong><small>Se mostrará en tu perfil y se aplicará a todos tus servicios.</small></span></div><select aria-label="Margen mínimo de reserva" value={minBookingNotice} onChange={(event) => setMinBookingNotice(Number(event.target.value))}><option value="0">Sin margen mínimo</option><option value="30">30 minutos</option><option value="60">1 hora</option><option value="120">2 horas</option><option value="360">6 horas</option><option value="720">12 horas</option><option value="1440">1 día</option><option value="2880">2 días</option><option value="10080">1 semana</option></select></div>
+      <div className="availability-day-list">{schedule.map((item) => <div className={item.enabled ? 'availability-day-row active' : 'availability-day-row'} key={item.weekday}><button type="button" className="availability-day-toggle" aria-pressed={item.enabled} onClick={() => setSchedule((current) => current.map((day) => day.weekday === item.weekday ? { ...day, enabled: !day.enabled } : day))}><span>{days[item.weekday]}</span><Check /></button><label>Desde<Time24Field label={`Desde el ${days[item.weekday].toLowerCase()}`} value={item.startsAt} disabled={!item.enabled} onChange={(value) => setSchedule((current) => current.map((day) => day.weekday === item.weekday ? { ...day, startsAt: value } : day))} /></label><label>Hasta<Time24Field label={`Hasta el ${days[item.weekday].toLowerCase()}`} value={item.endsAt} disabled={!item.enabled} onChange={(value) => setSchedule((current) => current.map((day) => day.weekday === item.weekday ? { ...day, endsAt: value } : day))} /></label></div>)}</div>
+      <Button onClick={save}>Guardar disponibilidad</Button>
+    </section>
+    <form className="exception-form" onSubmit={addException}><div><p className="eyebrow">Fechas concretas</p><h3>Días sueltos y bloqueos</h3><p>Añade horas extra fuera de tu rutina o marca vacaciones y ausencias.</p></div><label>Tipo<select name="kind" defaultValue="available"><option value="available">Disponibilidad puntual</option><option value="blocked">Bloqueo / no disponible</option></select></label><label>Fecha inicial<input type="date" value={exceptionStartDate} onChange={(event) => setExceptionStartDate(event.target.value)} required /></label><label>Hora inicial<Time24Field label="Hora inicial de la excepción" value={exceptionStartTime} onChange={setExceptionStartTime} /></label><label>Fecha final<input type="date" value={exceptionEndDate} onChange={(event) => setExceptionEndDate(event.target.value)} required /></label><label>Hora final<Time24Field label="Hora final de la excepción" value={exceptionEndTime} onChange={setExceptionEndTime} /></label><label>Motivo<input name="label" placeholder="Clase especial, vacaciones…" /></label><Button type="submit">Añadir fecha</Button></form><div className="compact-list exception-list">{exceptions.map((item) => <div key={item.id}><div><strong>{item.label || (item.available ? 'Disponibilidad puntual' : 'Bloqueo')}</strong><span>{item.available ? 'Disponible' : 'No disponible'} · {new Date(item.starts_at).toLocaleString('es-ES')} — {new Date(item.ends_at).toLocaleString('es-ES')}</span></div><button className="danger-action" onClick={() => removeException(item.id)}>Eliminar</button></div>)}</div>
+    {selectedBooking && <BookingDetailsDialog booking={selectedBooking} perspective="coach" currentUserId={user?.id} onClose={() => setSelectedBooking(null)} onSaved={() => { setSelectedBooking(null); setCalendarRefreshToken((value) => value + 1) }} />}
   </section>
 }
 

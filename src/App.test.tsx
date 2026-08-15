@@ -19,6 +19,7 @@ describe('CoachConnect', () => {
     const onSelect = vi.fn()
     const { rerender } = render(<SessionCalendar bookings={[booking]} perspective="coach" onSelect={onSelect} />)
 
+    fireEvent.click(screen.getByRole('button', { name: /periodo siguiente/i }))
     fireEvent.click(screen.getByRole('button', { name: /ver detalles de fuerza 1:1 con ana cliente/i }))
     expect(onSelect).toHaveBeenCalledWith(booking)
 
@@ -27,6 +28,24 @@ describe('CoachConnect', () => {
     expect(screen.getByRole('dialog')).toHaveTextContent('60 minutos')
     expect(screen.getByRole('dialog')).toHaveTextContent('35,00 €')
     expect(screen.getByRole('link', { name: /entrar a la videollamada/i })).toHaveAttribute('href', booking.video_url)
+  })
+
+  it('keeps completed and cancelled sessions visible on their calendar days', () => {
+    const bookings = [
+      {
+        id: 'completed-1', starts_at: '2026-08-13T16:00:00+02:00', ends_at: '2026-08-13T17:00:00+02:00', status: 'completed', amount_cents: 3500,
+        profiles: { display_name: 'Ana Cliente' }, coach_services: { name: 'Sesión completada', duration_minutes: 60, mode: 'online' as const },
+      },
+      {
+        id: 'cancelled-1', starts_at: '2026-08-12T18:00:00+02:00', ends_at: '2026-08-12T19:00:00+02:00', status: 'cancelled', amount_cents: 3500,
+        profiles: { display_name: 'Luis Cliente' }, coach_services: { name: 'Sesión cancelada', duration_minutes: 60, mode: 'online' as const },
+      },
+    ]
+
+    render(<SessionCalendar bookings={bookings} perspective="coach" onSelect={vi.fn()} />)
+
+    expect(screen.getByRole('button', { name: /ver detalles de sesión completada con ana cliente/i })).toHaveTextContent('Completada')
+    expect(screen.getByRole('button', { name: /ver detalles de sesión cancelada con luis cliente/i })).toHaveTextContent('Cancelada')
   })
 
   it('provides real navigation between profile, messages and professional profile', () => {

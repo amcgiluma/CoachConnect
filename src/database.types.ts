@@ -591,6 +591,38 @@ export type Database = {
           },
         ]
       }
+      client_rewards: {
+        Row: {
+          commission_discount_bps: number
+          consumer_id: string
+          qualifying_review_count: number
+          tier: string
+          updated_at: string
+        }
+        Insert: {
+          commission_discount_bps?: number
+          consumer_id: string
+          qualifying_review_count?: number
+          tier?: string
+          updated_at?: string
+        }
+        Update: {
+          commission_discount_bps?: number
+          consumer_id?: string
+          qualifying_review_count?: number
+          tier?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "client_rewards_consumer_id_fkey"
+            columns: ["consumer_id"]
+            isOneToOne: true
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       coach_profiles: {
         Row: {
           bio: string
@@ -744,6 +776,7 @@ export type Database = {
           package_size: number
           price_cents: number
           recurring_schedule_mode: string
+          request_booking_notice_minutes: number
         }
         Insert: {
           acceptance_window_hours?: number
@@ -766,6 +799,7 @@ export type Database = {
           package_size?: number
           price_cents: number
           recurring_schedule_mode?: string
+          request_booking_notice_minutes?: number
         }
         Update: {
           acceptance_window_hours?: number
@@ -788,6 +822,7 @@ export type Database = {
           package_size?: number
           price_cents?: number
           recurring_schedule_mode?: string
+          request_booking_notice_minutes?: number
         }
         Relationships: [
           {
@@ -1142,6 +1177,7 @@ export type Database = {
           action_url: string | null
           body: string
           created_at: string
+          dedupe_key: string | null
           id: string
           kind: string
           read_at: string | null
@@ -1152,6 +1188,7 @@ export type Database = {
           action_url?: string | null
           body?: string
           created_at?: string
+          dedupe_key?: string | null
           id?: string
           kind: string
           read_at?: string | null
@@ -1162,6 +1199,7 @@ export type Database = {
           action_url?: string | null
           body?: string
           created_at?: string
+          dedupe_key?: string | null
           id?: string
           kind?: string
           read_at?: string | null
@@ -1191,7 +1229,9 @@ export type Database = {
           id: string
           idempotency_key: string | null
           package_id: string | null
+          client_reward_tier: string
           platform_fee_cents: number
+          platform_fee_rate_bps: number
           status: string
           stripe_checkout_session_id: string | null
           stripe_payment_intent_id: string | null
@@ -1210,7 +1250,9 @@ export type Database = {
           id?: string
           idempotency_key?: string | null
           package_id?: string | null
+          client_reward_tier?: string
           platform_fee_cents: number
+          platform_fee_rate_bps?: number
           status?: string
           stripe_checkout_session_id?: string | null
           stripe_payment_intent_id?: string | null
@@ -1229,7 +1271,9 @@ export type Database = {
           id?: string
           idempotency_key?: string | null
           package_id?: string | null
+          client_reward_tier?: string
           platform_fee_cents?: number
+          platform_fee_rate_bps?: number
           status?: string
           stripe_checkout_session_id?: string | null
           stripe_payment_intent_id?: string | null

@@ -53,6 +53,38 @@ def test_service_validates_its_available_hours() -> None:
         )
 
 
+def test_request_service_notice_is_configurable_and_covers_response_window() -> None:
+    service = ServiceCreateRequest(
+        category_id="category-1", name="Solicitud anticipada", mode=ServiceMode.online,
+        duration_minutes=60, price_cents=3500, booking_mode="request",
+        acceptance_window_hours=12, request_booking_notice_minutes=24 * 60,
+    )
+
+    assert service.request_booking_notice_minutes == 1440
+    assert services_module.booking_notice_minutes(service.model_dump(), {"min_booking_notice_minutes": 30}) == 1440
+
+    with pytest.raises(ValueError, match="plazo de respuesta"):
+        ServiceCreateRequest(
+            category_id="category-1", name="Solicitud demasiado próxima", mode=ServiceMode.online,
+            duration_minutes=60, price_cents=3500, booking_mode="request",
+            acceptance_window_hours=12, request_booking_notice_minutes=6 * 60,
+        )
+
+
+def test_client_reward_reduces_the_platform_fee_snapshot(monkeypatch) -> None:
+    class RewardDatabase:
+        async def select(self, table: str, select: str = "*", **filters):
+            assert table == "client_rewards"
+            return [{"qualifying_review_count": 25, "tier": "silver", "commission_discount_bps": 200}]
+
+    monkeypatch.setattr(services_module, "db", RewardDatabase())
+    reward = asyncio.run(services_module.client_reward_terms("consumer-1"))
+
+    assert reward["tier"] == "silver"
+    assert reward["platform_fee_rate_bps"] == 1300
+    assert services_module.platform_fee(10_000, reward["platform_fee_rate_bps"]) == 1300
+
+
 def test_booking_schedule_enforces_notice_horizon_and_weekday() -> None:
     now = datetime.now(timezone.utc)
     service = {"booking_window_days": 60, "available_weekdays": [now.weekday()]}
@@ -618,6 +650,34 @@ def test_supabase_admin_authenticates_database_calls_as_service_role(monkeypatch
 
     assert database.headers["apikey"] == "service-role-test-key"
     assert database.headers["Authorization"] == "Bearer service-role-test-key"
+
+
+def test_supabase_admin_surfaces_postgrest_multiple_choice_as_an_error(monkeypatch) -> None:
+    monkeypatch.setattr(services_module.settings, "supabase_url", "http://127.0.0.1:54321")
+    monkeypatch.setattr(services_module.settings, "supabase_secret_key", "service-role-test-key")
+
+    class MultipleChoiceResponse:
+        status_code = 300
+        content = b'{"message":"Could not embed because more than one relationship was found"}'
+        text = content.decode()
+
+        def json(self):
+            return {"message": "Could not embed because more than one relationship was found"}
+
+    class FakeClient:
+        is_closed = False
+
+        async def request(self, *args, **kwargs):
+            return MultipleChoiceResponse()
+
+    database = services_module.SupabaseAdmin()
+    database._client = FakeClient()
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(database.select("bookings", select="*,profiles(display_name)"))
+
+    assert error.value.status_code == 502
+    assert "more than one relationship" in error.value.detail
 
 
 def test_integrations_does_not_treat_a_saved_stripe_id_as_connected(monkeypatch) -> None:

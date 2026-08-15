@@ -55,6 +55,23 @@ describe('profile loading transitions', () => {
 
     expect(await screen.findByRole('heading', { name: 'Hola, Marta Entrenadora.' })).toBeInTheDocument()
     expect(screen.queryByText(/hola, correo/i)).not.toBeInTheDocument()
+
+    await resolveRequest('/api/v1/feedback/pending?perspective=consumer', {
+      items: [{
+        booking: {
+          id: 'booking-feedback-1', status: 'completed', starts_at: '2026-08-13T14:00:00Z', ends_at: '2026-08-13T15:00:00Z', amount_cents: 3500,
+          coach_services: { name: 'Fuerza personal', duration_minutes: 60, mode: 'online' },
+          coach_profiles: { profiles: { display_name: 'Carlos Entrenador' } },
+        },
+        perspective: 'consumer', needs_outcome: true, needs_review: true,
+        review_deadline: '2026-08-27T15:00:00Z', action_url: '/reservas?booking=booking-feedback-1',
+      }],
+      reward: { qualifying_review_count: 0, tier: 'standard', commission_discount_bps: 0, effective_platform_fee_percent: 15, next_tier_at: 10 },
+    })
+
+    expect(await screen.findByRole('heading', { name: /termina de cerrar tus entrenamientos/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /confirmar resultado/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /valorar entrenador/i })).toBeInTheDocument()
   })
 
   it('mounts the professional portal only after all overview data is ready', async () => {

@@ -63,8 +63,10 @@ from .services import (
     auth_admin_set_user_ban_duration,
     auth_admin_set_user_access,
     assert_user_capability,
+    booking_notice_minutes,
     cancel_payment_intent,
     capture_payment_intent,
+    client_reward_terms,
     create_checkout,
     create_package_checkout,
     db,
@@ -245,7 +247,7 @@ PUBLIC_COACH_SELECT = (
     "user_id,headline,bio,city,mode,verification_status,responds_now,rating,review_count,min_booking_notice_minutes,"
     "languages,preferred_video_provider,profiles(display_name,avatar_url),"
     "coach_services(id,category_id,name,description,mode,duration_minutes,price_cents,package_size,active,"
-    "offer_type,booking_mode,expiry_days,cadence_weeks,acceptance_window_hours,"
+    "offer_type,booking_mode,expiry_days,cadence_weeks,acceptance_window_hours,request_booking_notice_minutes,"
     "booking_window_days,available_weekdays,available_start_time,available_end_time,"
     "categories(id,slug,name_es,parent_id))"
 )
@@ -414,7 +416,8 @@ async def coach_slots(coach_id: str, service_id: str, days: int | None = Query(d
             windows.append((window_start, window_end))
 
     items: list[dict[str, str]] = []
-    notice_minutes = int(coach_profiles[0].get("min_booking_notice_minutes") or 0) if coach_profiles else 30
+    coach_profile = coach_profiles[0] if coach_profiles else {"min_booking_notice_minutes": 30}
+    notice_minutes = booking_notice_minutes(service, coach_profile)
     earliest = now + timedelta(minutes=notice_minutes)
     for window_start, window_end in sorted(windows):
         cursor = max(window_start, earliest)
@@ -585,7 +588,7 @@ async def coach_calendar(
     return {
         "bookings": await db.select(
             "bookings",
-            select="*,coach_services(name,description,duration_minutes,mode),profiles(display_name)",
+            select="*,coach_services(name,description,duration_minutes,mode),profiles:profiles!bookings_consumer_id_fkey(display_name),session_reports(id,author_id,outcome,circumstances,note),reviews(id,author_id,revealed_at)",
             coach_id=f"eq.{user.id}",
             starts_at=f"lt.{date_to.isoformat()}",
             ends_at=f"gt.{date_from.isoformat()}",
@@ -897,10 +900,86 @@ async def bookings(
     )
     return await db.select(
         "bookings",
-        select="*,coach_services(name,duration_minutes),coach_profiles(headline,profiles(display_name)),profiles(display_name),session_reports(id,author_id,outcome,circumstances,note),reviews(id,author_id,revealed_at)",
+        select="*,coach_services(name,description,duration_minutes,mode),coach_profiles(headline,profiles(display_name)),profiles:profiles!bookings_consumer_id_fkey(display_name),session_reports(id,author_id,outcome,circumstances,note),reviews(id,author_id,revealed_at)",
         **role_filter,
         order="starts_at.desc",
     )
+
+
+@app.get("/api/v1/feedback/pending", tags=["reviews"])
+async def pending_feedback(
+    perspective: Literal["consumer", "coach", "all"] = Query(default="all"),
+    user: AuthUser = Depends(current_user),
+) -> dict[str, Any]:
+    await advance_training_lifecycle()
+    role_filter = (
+        {"consumer_id": f"eq.{user.id}"}
+        if perspective == "consumer"
+        else {"coach_id": f"eq.{user.id}"}
+        if perspective == "coach"
+        else {"or_": f"(consumer_id.eq.{user.id},coach_id.eq.{user.id})"}
+    )
+    rows = await db.select(
+        "bookings",
+        select="*,coach_services(name,description,duration_minutes,mode),coach_profiles(profiles(display_name)),profiles:profiles!bookings_consumer_id_fkey(display_name),session_reports(id,author_id,outcome,circumstances,note),reviews(id,author_id,revealed_at)",
+        status="in.(completed,disputed)",
+        **role_filter,
+        order="ends_at.desc",
+    )
+    now = datetime.now(timezone.utc)
+    items: list[dict[str, Any]] = []
+    for booking in rows:
+        own_reports = [item for item in booking.get("session_reports") or [] if item.get("author_id") == user.id]
+        own_reviews = [item for item in booking.get("reviews") or [] if item.get("author_id") == user.id]
+        own_attended = bool(own_reports and own_reports[0].get("outcome") in {"attended", "attended_with_issues"})
+        needs_outcome = (
+            booking["status"] == "completed"
+            and not booking.get("outcome_finalized_at")
+            and not own_reports
+        )
+        deadline_anchor = booking.get("outcome_finalized_at") or booking["ends_at"]
+        review_deadline = datetime.fromisoformat(deadline_anchor.replace("Z", "+00:00")) + timedelta(days=14)
+        attended = booking.get("outcome_status") in {"attended", "attended_with_issues", "assumed_attended"}
+        needs_review = (
+            booking["status"] == "completed"
+            and not own_reviews
+            and review_deadline >= now
+            and (attended or own_attended)
+        )
+        if not needs_outcome and not needs_review:
+            continue
+        booking_perspective = "consumer" if booking.get("consumer_id") == user.id else "coach"
+        items.append({
+            "booking": booking,
+            "perspective": booking_perspective,
+            "needs_outcome": needs_outcome,
+            "needs_review": needs_review,
+            "review_deadline": review_deadline.isoformat(),
+            "action_url": (
+                f"/reservas?booking={booking['id']}&feedback=1"
+                if booking_perspective == "consumer"
+                else f"/profesional?tab=reviews&booking={booking['id']}"
+            ),
+        })
+
+    reward = await client_reward_terms(user.id)
+    review_count = int(reward["qualifying_review_count"])
+    next_tier_at = 10 if review_count < 10 else 25 if review_count < 25 else 50 if review_count < 50 else None
+    reward["next_tier_at"] = next_tier_at
+    reward["effective_platform_fee_percent"] = reward.pop("platform_fee_rate_bps") / 100
+    return {"items": items, "reward": reward}
+
+
+async def mark_feedback_notification_read(booking_id: str, user_id: str) -> None:
+    """Notification housekeeping must never prevent saving the user's feedback."""
+    try:
+        await db.update(
+            "notifications",
+            {"read_at": datetime.now(timezone.utc).isoformat()},
+            dedupe_key=f"eq.training-feedback:{booking_id}:{user_id}",
+        )
+    except Exception:
+        logger.warning("Could not mark feedback notification as read", exc_info=True)
 
 
 @app.post("/api/v1/bookings/{booking_id}/cancel", tags=["bookings"])
@@ -977,6 +1056,8 @@ async def report_booking_outcome(
     )
     recipient_id = booking["coach_id"] if user.id == booking["consumer_id"] else booking["consumer_id"]
     await notify_user(recipient_id, "session_outcome", "Confirma cómo fue la sesión", "La otra parte ha registrado el resultado. Tienes 48 horas para responder.", "/reservas")
+    if payload.outcome not in {"attended", "attended_with_issues"}:
+        await mark_feedback_notification_read(booking_id, user.id)
     await advance_training_lifecycle()
     return report
 
@@ -1021,6 +1102,7 @@ async def create_review(booking_id: str, payload: ReviewCreateRequest, user: Aut
         },
         "booking_id,author_id",
     )
+    await mark_feedback_notification_read(booking_id, user.id)
     pair = await db.select("reviews", booking_id=f"eq.{booking_id}")
     if len(pair) >= 2:
         revealed_at = datetime.now(timezone.utc).isoformat()
@@ -1072,12 +1154,18 @@ async def client_reputation(client_id: str, user: AuthUser = Depends(current_use
         raise HTTPException(403, "Necesitas una solicitud, reserva o conversación con este cliente")
     profiles = await db.select("profiles", select="id,display_name,avatar_url", id=f"eq.{client_id}")
     summaries = await db.select("reputation_summaries", profile_id=f"eq.{client_id}")
+    rewards = await db.select("client_rewards", consumer_id=f"eq.{client_id}")
     reviews = await db.select(
         "reviews", select="id,rating,comment,punctuality,communication,respect,commitment,revealed_at",
         subject_id=f"eq.{client_id}", target_role="eq.consumer", revealed_at="not.is.null",
         moderation_status="eq.visible", order="revealed_at.desc",
     )
-    return {"profile": profiles[0] if profiles else None, "summary": summaries[0] if summaries else None, "items": reviews}
+    return {
+        "profile": profiles[0] if profiles else None,
+        "summary": summaries[0] if summaries else None,
+        "reward": rewards[0] if rewards else {"qualifying_review_count": 0, "tier": "standard", "commission_discount_bps": 0},
+        "items": reviews,
+    }
 
 
 @app.post("/api/v1/reviews/{review_id}/reply", tags=["reviews"])
@@ -1102,11 +1190,29 @@ async def coach_booking_requests(user: AuthUser = Depends(current_user)) -> list
         coach_id=f"eq.{user.id}", order="created_at.desc",
     )
     consumer_ids = sorted({row["consumer_id"] for row in rows})
-    profiles = await db.select("profiles", select="id,display_name,avatar_url", id=f"in.({','.join(consumer_ids)})") if consumer_ids else []
-    summaries = await db.select("reputation_summaries", profile_id=f"in.({','.join(consumer_ids)})") if consumer_ids else []
+    booking_ids = sorted({row["booking_id"] for row in rows if row.get("booking_id")})
+    package_ids = sorted({row["package_id"] for row in rows if row.get("package_id")})
+    profiles, summaries, rewards, booking_payments, package_payments = await asyncio.gather(
+        db.select("profiles", select="id,display_name,avatar_url", id=f"in.({','.join(consumer_ids)})") if consumer_ids else asyncio.sleep(0, result=[]),
+        db.select("reputation_summaries", profile_id=f"in.({','.join(consumer_ids)})") if consumer_ids else asyncio.sleep(0, result=[]),
+        db.select("client_rewards", consumer_id=f"in.({','.join(consumer_ids)})") if consumer_ids else asyncio.sleep(0, result=[]),
+        db.select("payments", select="booking_id,amount_cents,platform_fee_cents,platform_fee_rate_bps,client_reward_tier", booking_id=f"in.({','.join(booking_ids)})") if booking_ids else asyncio.sleep(0, result=[]),
+        db.select("payments", select="package_id,amount_cents,platform_fee_cents,platform_fee_rate_bps,client_reward_tier", package_id=f"in.({','.join(package_ids)})") if package_ids else asyncio.sleep(0, result=[]),
+    )
     profiles_by_id = {item["id"]: item for item in profiles}
     summaries_by_id = {item["profile_id"]: item for item in summaries}
-    return [{**row, "client": profiles_by_id.get(row["consumer_id"]), "client_reputation": summaries_by_id.get(row["consumer_id"])} for row in rows]
+    rewards_by_id = {item["consumer_id"]: item for item in rewards}
+    payments_by_booking = {item["booking_id"]: item for item in booking_payments}
+    payments_by_package = {item["package_id"]: item for item in package_payments}
+    return [{
+        **row,
+        "client": profiles_by_id.get(row["consumer_id"]),
+        "client_reputation": summaries_by_id.get(row["consumer_id"]),
+        "client_reward": rewards_by_id.get(row["consumer_id"], {
+            "qualifying_review_count": 0, "tier": "standard", "commission_discount_bps": 0,
+        }),
+        "payment_terms": payments_by_booking.get(row.get("booking_id")) or payments_by_package.get(row.get("package_id")),
+    } for row in rows]
 
 
 @app.post("/api/v1/coach/booking-requests/{request_id}/decision", tags=["bookings"])

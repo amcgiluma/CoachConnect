@@ -16,6 +16,14 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .brand-mark { width: 24px; height: 24px; background: var(--ink); display: grid; place-items: center; border-radius: 50% 50% 50% 4px; transform: rotate(-18deg); }
 .brand-mark span { width: 8px; height: 8px; border: 2px solid var(--acid); border-radius: 50%; }
 .top-actions { display: flex; align-items: center; gap: 22px; }
+.feedback-reminder-banner { position: sticky; z-index: 9; top: 0; display: flex; align-items: center; gap: 12px; padding: 11px 4vw; border-block: 1px solid #a9c64f; background: #f1f9d4; box-shadow: 0 8px 24px #11120f0d; }
+.feedback-reminder-banner > svg { width: 20px; flex: 0 0 auto; color: #668400; }
+.feedback-reminder-banner > span { display: grid; gap: 2px; flex: 1; }
+.feedback-reminder-banner strong { font-size: 11px; }
+.feedback-reminder-banner small { color: #596047; font-size: 9px; display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; }
+.feedback-reminder-banner small time { color: var(--ink); font-family: var(--mono); white-space: nowrap; }
+.feedback-reminder-banner a { color: var(--ink); font-size: 10px; font-weight: 800; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.feedback-reminder-banner a svg { width: 14px; }
 .text-button, .login-button, .icon-button, .back-link, .footer button, .panel-heading button, .profile-block button { border: 0; background: none; }
 .text-button { font-size: 12px; font-weight: 700; }
 .subtle { color: var(--muted); }
@@ -408,6 +416,9 @@ a { color: inherit; text-decoration: none; }
 .admin-form, .time-range, .exception-form { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; margin: 24px 0; }
 .admin-form label, .time-range label, .exception-form label { display: grid; gap: 6px; color: var(--muted); font-size: 9px; }
 .admin-form input, .time-range input, .exception-form input, .exception-form select { border: 1px solid var(--line); background: var(--surface); padding: 11px; }
+.time-24-field { min-height: 42px; display: inline-flex; align-items: center; border: 1px solid var(--line); background: var(--surface); color: var(--ink); }
+.time-24-field select { min-width: 62px; height: 40px; border: 0; background: transparent; padding: 0 8px; color: inherit; }
+.time-24-field > span { color: var(--muted); font-weight: 800; }
 .admin-users-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; }
 .admin-users-head h2 { font: 700 25px var(--display); letter-spacing: -.06em; }
 .admin-users-head p { color: var(--muted); font-size: 10px; margin-top: 5px; }
@@ -645,6 +656,7 @@ a { color: inherit; text-decoration: none; }
 .services-heading .form-intro { margin-bottom: 0; }
 .services-heading .button svg { width: 16px; }
 .service-editor { background: #f6f6ef; border: 1px solid var(--line); padding: 22px; margin-bottom: 28px; }
+.service-editor-anchor .service-editor { margin: 0 0 10px; border-top: 3px solid var(--acid-deep); }
 .service-editor .pro-form .button { margin-top: 0; }
 .pro-form label small { color: #8a8b83; font-size: 9px; }
 .service-form-section { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; margin-top: 8px; padding: 13px 0 8px; border-top: 1px solid var(--line); }
@@ -711,6 +723,9 @@ a { color: inherit; text-decoration: none; }
 button.calendar-event { cursor: pointer; transition: transform .15s ease, box-shadow .15s ease; }
 button.calendar-event:hover, button.calendar-event:focus-visible { transform: translateY(-1px); box-shadow: 0 5px 14px #11120f18; outline: 2px solid #789b0f; outline-offset: 1px; }
 .calendar-event.status-pending-payment { background: #fff2ca; border-left-color: #c48a00; }
+.calendar-event.status-completed { background: #e5f1f6; border-left-color: #4b8299; }
+.calendar-event.status-disputed { background: #ffe6df; border-left-color: #b85e4b; }
+.calendar-event.status-refunded { background: #ecece7; border-left-color: #7b7d74; }
 .calendar-event.status-cancelled { opacity: .55; background: #efefea; border-left-color: #999; }
 .calendar-event.blocked { background: #f2e8e5; border-left-color: #a55a4e; }
 .calendar-event.available-extra { background: #e4f5ca; border-left-color: #6f9500; }
@@ -718,15 +733,24 @@ button.calendar-event:hover, button.calendar-event:focus-visible { transform: tr
 .calendar-event strong { font-size: 10px; line-height: 1.25; }
 .calendar-event span { color: var(--muted); font-size: 9px; }
 .calendar-empty { color: #a0a199; font-size: 9px; padding: 7px 2px; }
+.calendar-weekday-row { display: none; }
 .calendar-day .week-grid { grid-template-columns: minmax(0, 1fr); min-width: 0; }
 .calendar-day .week-grid > article { min-height: 300px; border-right: 0; }
 .calendar-day .week-events { grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); }
-.calendar-month .week-grid > article { min-height: 130px; }
-.calendar-month .week-day-head { min-height: 42px; }
-.calendar-month .week-events { gap: 3px; padding: 5px; }
-.calendar-month .calendar-event { padding: 5px; }
+.calendar-month .calendar-weekday-row { min-width: 700px; display: grid; grid-template-columns: repeat(7, minmax(100px, 1fr)); border-bottom: 1px solid var(--line); background: #efefe9; }
+.calendar-month .calendar-weekday-row span { padding: 9px 11px; border-right: 1px solid var(--line); color: var(--muted); font: 8px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+.calendar-month .calendar-weekday-row span:last-child { border-right: 0; }
+.calendar-month .week-grid > article { min-height: 142px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.calendar-month .week-grid > article.today { background: var(--surface); }
+.calendar-month .week-day-head { min-height: 38px; justify-content: flex-end; padding: 6px 9px; border-bottom: 0; }
+.calendar-month .week-day-head > span { display: none; }
+.calendar-month .week-events { max-height: 102px; gap: 4px; padding: 2px 6px 7px; overflow-y: auto; }
+.calendar-month .calendar-event { grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: 6px; padding: 6px 7px; }
+.calendar-month .calendar-event time { grid-column: 1; }
+.calendar-month .calendar-event strong { grid-column: 2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .calendar-month .calendar-event span, .calendar-month .calendar-event small { display: none; }
-.calendar-month .outside-month { opacity: .42; background: #eeeeea; }
+.calendar-month .outside-month { opacity: 1; background: #f1f1ec; }
+.calendar-month .outside-month .week-day-head strong { color: #a7a89f; background: transparent; }
 .availability-settings { border-top: 1px solid var(--line); padding-top: 28px; }
 .availability-settings > div:first-child > p:last-child { color: var(--muted); font-size: 11px; margin-top: 5px; }
 .booking-policy-setting { margin: 18px 0; padding: 15px; border: 1px solid var(--line); background: var(--surface); display: flex; align-items: center; justify-content: space-between; gap: 18px; }
@@ -766,6 +790,34 @@ button.calendar-event:hover, button.calendar-event:focus-visible { transform: tr
 .booking-detail-dialog footer { margin-top: 18px; display: flex; align-items: center; }
 .booking-detail-dialog footer > span { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 9px; }
 .booking-detail-dialog footer svg { width: 15px; }
+.booking-detail-actions { margin-left: auto; display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
+.booking-detail-actions .text-button { display: inline-flex; align-items: center; gap: 6px; }
+.booking-detail-actions svg { width: 15px; }
+.client-reward-card { margin: 0 0 22px; padding: 19px; display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 17px; border: 1px solid var(--line); background: var(--surface); }
+.client-reward-badge { width: 78px; height: 78px; border-radius: 50%; display: grid; place-items: center; align-content: center; gap: 3px; background: #ecece5; font: 800 10px var(--display); }
+.client-reward-badge svg { width: 25px; }
+.client-reward-card.tier-bronze .client-reward-badge, .client-tier.tier-bronze { background: #e8c19e; }
+.client-reward-card.tier-silver .client-reward-badge, .client-tier.tier-silver { background: #dfe4e6; }
+.client-reward-card.tier-gold .client-reward-badge, .client-tier.tier-gold { background: #f4d777; }
+.client-reward-card h2 { font: 700 20px var(--display); letter-spacing: -.05em; margin-bottom: 5px; }
+.client-reward-card p { color: var(--muted); font-size: 10px; }
+.client-reward-card progress { width: min(420px, 100%); height: 8px; accent-color: var(--acid-deep); }
+.client-tier { display: inline-flex; align-items: center; gap: 4px; padding: 4px 7px; font-size: 8px; font-weight: 800; }
+.client-tier svg { width: 12px; }
+.request-fee-note { color: var(--muted); font-size: 9px; }
+.pending-feedback-manager { margin: 18px 0 28px; padding: 18px; border: 1px solid #cddd9b; background: #f7fbe8; display: grid; gap: 9px; }
+.pending-feedback-manager h3 { font: 700 19px var(--display); }
+.pending-feedback-manager h2 { font: 700 22px var(--display); letter-spacing: -.05em; margin-bottom: 5px; }
+.pending-feedback-manager > div:first-child > p:last-child { color: var(--muted); font-size: 10px; }
+.client-pending-feedback { margin-top: 22px; border-color: #b9cf71; box-shadow: 0 10px 28px #657d1110; }
+.pending-feedback-manager article { padding: 13px; border: 1px solid #dce8b7; background: var(--surface); display: flex; align-items: center; gap: 14px; }
+.pending-feedback-main { flex: 1; min-width: 0; padding: 0; border: 0; background: transparent; display: flex; align-items: center; gap: 10px; text-align: left; }
+.pending-feedback-main > svg { width: 18px; flex: 0 0 auto; }
+.pending-feedback-main > svg:last-child { margin-left: auto; }
+.pending-feedback-main > span { min-width: 0; display: grid; gap: 3px; }
+.pending-feedback-manager article span { color: var(--muted); font-size: 9px; }
+.pending-feedback-manager article > div:last-child { display: flex; gap: 7px; flex-wrap: wrap; }
+.chat-empty-state { margin: auto; color: var(--muted); font-size: 10px; text-align: center; }
 .public-booking-policy { margin-top: 7px; display: flex; align-items: center; gap: 5px; color: var(--acid) !important; }
 .public-booking-policy svg { width: 13px; }
 .service-availability-summary { color: #8fa92c !important; }

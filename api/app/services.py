@@ -23,8 +23,33 @@ from .config import settings
 logger = logging.getLogger(__name__)
 
 
-def platform_fee(amount_cents: int) -> int:
-    return round(amount_cents * settings.platform_fee_percent / 100)
+def platform_fee(amount_cents: int, rate_bps: int | None = None) -> int:
+    effective_rate_bps = settings.platform_fee_percent * 100 if rate_bps is None else rate_bps
+    return round(amount_cents * effective_rate_bps / 10000)
+
+
+async def client_reward_terms(user_id: str) -> dict[str, Any]:
+    rows = await db.select(
+        "client_rewards",
+        select="qualifying_review_count,tier,commission_discount_bps",
+        consumer_id=f"eq.{user_id}",
+        limit="1",
+    )
+    reward = rows[0] if rows else {}
+    discount_bps = int(reward.get("commission_discount_bps") or 0)
+    base_rate_bps = int(settings.platform_fee_percent) * 100
+    return {
+        "qualifying_review_count": int(reward.get("qualifying_review_count") or 0),
+        "tier": reward.get("tier") or "standard",
+        "commission_discount_bps": discount_bps,
+        "platform_fee_rate_bps": max(0, base_rate_bps - discount_bps),
+    }
+
+
+def booking_notice_minutes(service: dict[str, Any], coach: dict[str, Any]) -> int:
+    if service.get("booking_mode") == "request":
+        return int(service.get("request_booking_notice_minutes") or 2160)
+    return int(coach.get("min_booking_notice_minutes") or 0)
 
 
 def validate_booking_schedule(
@@ -35,7 +60,7 @@ def validate_booking_schedule(
 ) -> None:
     """Enforce the same lead-time, weekday and horizon rules exposed as slots."""
     now = datetime.now(timezone.utc)
-    earliest = now + timedelta(minutes=int(coach.get("min_booking_notice_minutes") or 0))
+    earliest = now + timedelta(minutes=booking_notice_minutes(service, coach))
     latest = now + timedelta(days=int(service.get("booking_window_days") or 31))
     allowed_weekdays = set(service.get("available_weekdays") or range(7))
     service_start = datetime_time.fromisoformat(service.get("available_start_time") or "00:00")
@@ -48,7 +73,7 @@ def validate_booking_schedule(
         normalized = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
         normalized = normalized.astimezone(timezone.utc)
         if normalized < earliest:
-            raise HTTPException(409, "Ese horario no cumple el margen mínimo de reserva del entrenador")
+            raise HTTPException(409, "Ese horario no cumple el margen mínimo de reserva aplicable al servicio")
         if normalized > latest:
             raise HTTPException(409, "Ese horario queda fuera del periodo de reserva de este servicio")
         if normalized.astimezone(local_zone).weekday() not in allowed_weekdays:
@@ -199,9 +224,12 @@ class SupabaseAdmin:
             json=json,
             headers=headers,
         )
-        if response.status_code >= 400:
+        if response.status_code >= 300:
             detail = response.json().get("message", response.text) if response.content else "Error de base de datos"
-            raise HTTPException(response.status_code, detail)
+            # PostgREST uses HTTP 300 for ambiguous embedded relationships.
+            # Treating that JSON error object as a successful row hides the real
+            # database problem and later produces misleading KeyError failures.
+            raise HTTPException(response.status_code if response.status_code >= 400 else 502, detail)
         if not response.content:
             return []
         data = response.json()
@@ -451,7 +479,10 @@ async def create_checkout(
     if normalized_start <= datetime.now(timezone.utc):
         raise HTTPException(422, "La reserva debe ser futura")
     validate_booking_schedule(service, coaches[0], [normalized_start])
+    reward = await client_reward_terms(user_id)
+    fee_rate_bps = int(reward["platform_fee_rate_bps"])
     amount = service["price_cents"]
+    fee_cents = platform_fee(amount, fee_rate_bps)
     booking = await db.rpc(
         "create_pending_booking",
         {
@@ -460,14 +491,11 @@ async def create_checkout(
             "p_starts_at": normalized_start.isoformat(),
             "p_notes": notes,
             "p_meeting_provider": provider,
-            "p_platform_fee_percent": settings.platform_fee_percent,
+            "p_platform_fee_percent": fee_rate_bps / 100,
         },
     )
     request_row: dict[str, Any] | None = None
     if service.get("booking_mode") == "request":
-        if normalized_start < datetime.now(timezone.utc) + timedelta(hours=36):
-            await db.update("bookings", {"status": "cancelled"}, id=f"eq.{booking['id']}")
-            raise HTTPException(409, "Las solicitudes necesitan al menos 36 horas de antelación")
         request_row = await db.insert(
             "booking_requests",
             {
@@ -503,7 +531,7 @@ async def create_checkout(
     stripe_account = coaches[0].get("stripe_account_id")
     if stripe_account:
         checkout_args["payment_intent_data"] = {
-            "application_fee_amount": platform_fee(amount),
+            "application_fee_amount": fee_cents,
             "transfer_data": {"destination": stripe_account},
             **({"capture_method": "manual"} if request_row else {}),
         }
@@ -522,7 +550,9 @@ async def create_checkout(
             "coach_id": service["coach_id"],
             "stripe_checkout_session_id": session.id,
             "amount_cents": amount,
-            "platform_fee_cents": platform_fee(amount),
+            "platform_fee_cents": fee_cents,
+            "platform_fee_rate_bps": fee_rate_bps,
+            "client_reward_tier": reward["tier"],
             "capture_method": "manual" if request_row else "automatic",
             "authorization_expires_at": request_row.get("expires_at") if request_row else None,
             "idempotency_key": f"checkout:{booking['id']}",
@@ -559,6 +589,9 @@ async def create_package_checkout(
         raise HTTPException(409, "El entrenador no ha completado Stripe Connect")
     if settings.stripe_secret_key:
         require_ready_stripe_account(stripe_account)
+    reward = await client_reward_terms(user_id)
+    fee_rate_bps = int(reward["platform_fee_rate_bps"])
+    fee_cents = platform_fee(service["price_cents"], fee_rate_bps)
 
     series: dict[str, Any] | None = None
     if service.get("offer_type") == "recurring_plan":
@@ -616,17 +649,14 @@ async def create_package_checkout(
                     "session_count": service["package_size"],
                     "expiry_days": service.get("expiry_days") or 90,
                     "booking_mode": service.get("booking_mode") or "instant",
+                    "client_reward_tier": reward["tier"],
+                    "platform_fee_rate_bps": fee_rate_bps,
                 },
             },
         )
 
     request_row: dict[str, Any] | None = None
     if service.get("booking_mode") == "request":
-        if starts_at and starts_at.astimezone(timezone.utc) < datetime.now(timezone.utc) + timedelta(hours=36):
-            await db.update("booking_packages", {"status": "cancelled"}, id=f"eq.{package['id']}")
-            if series:
-                await db.update("bookings", {"status": "cancelled"}, series_id=f"eq.{series['series_id']}")
-            raise HTTPException(409, "Las solicitudes necesitan al menos 36 horas de antelación")
         request_row = await db.insert(
             "booking_requests",
             {
@@ -664,7 +694,7 @@ async def create_package_checkout(
             expires_at=int(time.time()) + 1800,
             **({"payment_method_types": ["card"]} if request_row else {}),
             payment_intent_data={
-                "application_fee_amount": platform_fee(service["price_cents"]),
+                "application_fee_amount": fee_cents,
                 "transfer_data": {"destination": stripe_account},
                 **({"capture_method": "manual"} if request_row else {}),
             },
@@ -681,7 +711,9 @@ async def create_package_checkout(
             "coach_id": service["coach_id"],
             "stripe_checkout_session_id": session.id,
             "amount_cents": service["price_cents"],
-            "platform_fee_cents": platform_fee(service["price_cents"]),
+            "platform_fee_cents": fee_cents,
+            "platform_fee_rate_bps": fee_rate_bps,
+            "client_reward_tier": reward["tier"],
             "capture_method": "manual" if request_row else "automatic",
             "authorization_expires_at": request_row.get("expires_at") if request_row else None,
             "idempotency_key": f"checkout:{package['id']}",

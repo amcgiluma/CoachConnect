@@ -82,6 +82,8 @@ class ServiceCreateRequest(BaseModel):
     package_size: int = Field(default=1, ge=1, le=24)
     offer_type: str = "single"
     booking_mode: str = "instant"
+    acceptance_window_hours: int = Field(default=12, ge=1, le=24)
+    request_booking_notice_minutes: int = Field(default=2160, ge=60, le=10080)
     expiry_days: int | None = Field(default=None, ge=30, le=365)
     cadence_weeks: int | None = None
     recurring_schedule_mode: str = "fixed"
@@ -106,6 +108,8 @@ class ServiceCreateRequest(BaseModel):
             raise ValueError("Tipo de oferta no válido")
         if self.booking_mode not in {"instant", "request"}:
             raise ValueError("Modo de reserva no válido")
+        if self.request_booking_notice_minutes < self.acceptance_window_hours * 60:
+            raise ValueError("La antelación de una solicitud debe cubrir el plazo de respuesta")
         if self.recurring_schedule_mode not in {"fixed", "flexible"}:
             raise ValueError("Modo de fechas no válido")
         if self.offer_type == "single":

@@ -5,7 +5,7 @@ export type CoachService = {
   id?: string; name: string; detail: string; price: number; duration?: number; packageSize?: number
   offerType?: 'single' | 'flex_pack' | 'recurring_plan'; bookingMode?: 'instant' | 'request'; recurringScheduleMode?: 'fixed' | 'flexible'
   expiryDays?: number | null; cadenceWeeks?: number | null; bookingWindowDays?: number; availableWeekdays?: number[]
-  availableStartTime?: string; availableEndTime?: string
+  availableStartTime?: string; availableEndTime?: string; requestBookingNoticeMinutes?: number
 }
 export type Coach = {
   id: string; name: string; initials: string; specialty: string; category: string; mode: Mode; city: string
