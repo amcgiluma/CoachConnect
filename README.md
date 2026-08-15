@@ -13,7 +13,9 @@ La implementación cubre:
 - Perfiles, agenda real, excepciones, reservas transaccionales sin solapes y cancelación del cliente hasta 24 horas antes.
 - Confirmación bilateral de asistencia, valoraciones de doble ciego, reputación separada para entrenadores y clientes, respuestas públicas y resolución administrativa de disputas.
 - Bonos flexibles con créditos y planes periódicos semanales o quincenales que reservan toda la serie de forma atómica.
-- Auth Email/Google/Apple, mensajería Realtime, adjuntos privados, bloqueos, denuncias y notificaciones web/email.
+- Auth Email/Google/Apple, mensajería Realtime, adjuntos privados, bloqueos, denuncias y comunicaciones duraderas por app, email y calendario.
+- Correos transaccionales descriptivos con fecha, participantes, ubicación o acceso online, importes, comisión/neto por rol, recibo e invitación ICS; recordatorios y preferencias no esenciales.
+- Sincronización opcional con Google Calendar, creación de Meet, ubicaciones exactas privadas tras confirmar y reprogramaciones bilaterales.
 - Portal profesional con onboarding, servicios, agenda, acreditaciones, vídeo, Stripe Connect y videollamadas.
 - Operaciones para validar profesionales y vídeos, moderar, gestionar taxonomía y consultar pagos.
 - Interfaz responsive, base bilingüe español/inglés y pruebas Vitest, Pytest y Playwright.
@@ -27,6 +29,7 @@ Email funciona con la configuración actual. Google, Apple, Stripe, Resend, Meet
 - Google Calendar/Meet usa exactamente `BACKEND_URL/api/v1/integrations/google/callback`. Mientras la pantalla de consentimiento esté en **Testing**, añade cada cuenta en Google Auth Platform → Audience → Test users. Habilita también Google Calendar API.
 - Zoom usa exactamente el valor de `ZOOM_REDIRECT_URI`. Debe ser una URL HTTPS estable y no-localhost; el desarrollo local puede usar una página pública que reenvíe `code` y `state` al callback local. Copia la URL completa tanto en OAuth Redirect URL como en OAuth Allow Lists de la app de desarrollo de Zoom; protocolo, host, ruta y barra final deben coincidir.
 - Tras un callback correcto aparece una fila `google` o `zoom` en `integration_connections`. Un botón pulsado sin esa fila no significa que la integración haya terminado.
+- Resend entrega el correo transaccional. Registra `https://<API>/api/v1/webhooks/resend`, copia su secreto `whsec_...` a `RESEND_WEBHOOK_SECRET` y habilita eventos de entrega, rebote y complaint. Los rebotes duros y complaints suprimen nuevos envíos a esa cuenta.
 
 ## Tecnologías
 
@@ -86,6 +89,8 @@ Variables principales:
 - `STRIPE_SECRET_KEY`
 - `STRIPE_WEBHOOK_SECRET`
 - `INTERNAL_CRON_SECRET` (protege el avance periódico de sesiones, plazos y autorizaciones)
+- `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, `EMAIL_FROM` y `EMAIL_REPLY_TO`
+- `OPERATIONS_EMAIL` (alertas de moderación, disputas y fallos operativos)
 - `TOKEN_ENCRYPTION_KEY`
 - Credenciales OAuth de Google y Zoom, y Resend si se quiere email.
 
@@ -100,7 +105,7 @@ npx supabase db push
 npx supabase db lint --linked
 ```
 
-El orden aplicable termina en `20260811112752_schedule_training_lifecycle.sql`; Supabase aplica automáticamente el historial por marca temporal. Antes de producción:
+El orden aplicable termina en `20260814134904_route_training_feedback_through_communications.sql`; Supabase aplica automáticamente el historial por marca temporal. Antes de producción:
 
 1. Configura Email, Google y Apple en Auth y registra las URLs de local, Vercel y producción.
 2. Ejecuta los advisors de seguridad y rendimiento desde Supabase.
@@ -110,7 +115,8 @@ El orden aplicable termina en `20260811112752_schedule_training_lifecycle.sql`; 
 .venv\Scripts\python.exe api/scripts/bootstrap_admin.py admin@dominio.com
 ```
 
-4. Programa una llamada frecuente (por ejemplo, cada cinco minutos) a `POST /api/v1/internal/lifecycle` con la cabecera `X-Cron-Secret`. El valor debe coincidir con `INTERNAL_CRON_SECRET`; la operación es idempotente y libera autorizaciones caducadas.
+4. Programa una llamada frecuente (cada cinco minutos) a `POST /api/v1/internal/lifecycle` con la cabecera `X-Cron-Secret`. El valor debe coincidir con `INTERNAL_CRON_SECRET`; la operación es idempotente y, además de avanzar sesiones y liberar autorizaciones, programa recordatorios y procesa las colas de email/calendario con reintentos.
+5. Configura SMTP personalizado en Supabase Auth para usar las plantillas de `supabase/templates`; en los proyectos Free nuevos las plantillas personalizadas requieren SMTP propio.
 
 El proyecto incluye `.cursor/mcp.json` para `https://mcp.supabase.com/mcp`. Reinicia/recarga Cursor y completa OAuth para habilitar sus herramientas.
 
@@ -161,6 +167,6 @@ docker-compose.yml
 
 - Aplicar la última migración y probar la matriz RLS con anon, consumidor, entrenador y admin.
 - Mantener `SUPABASE_SECRET_KEY`, Stripe, OAuth y `TOKEN_ENCRYPTION_KEY` solo en el backend.
-- Probar firmas e idempotencia de webhooks de Stripe en staging.
+- Probar firmas e idempotencia de webhooks de Stripe y Resend en staging.
 - Revisar RGPD, condiciones, cancelaciones y fiscalidad con asesoría legal.
 - No mostrar direcciones personales exactas antes de una reserva confirmada.

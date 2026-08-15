@@ -248,6 +248,63 @@ export type Database = {
           },
         ]
       }
+      booking_private_locations: {
+        Row: {
+          address_line: string
+          booking_id: string
+          confirmed_at: string
+          confirmed_by: string
+          instructions: string
+          latitude: number | null
+          locality: string
+          longitude: number | null
+          postal_code: string
+          source: string
+          updated_at: string
+        }
+        Insert: {
+          address_line: string
+          booking_id: string
+          confirmed_at?: string
+          confirmed_by: string
+          instructions?: string
+          latitude?: number | null
+          locality: string
+          longitude?: number | null
+          postal_code?: string
+          source: string
+          updated_at?: string
+        }
+        Update: {
+          address_line?: string
+          booking_id?: string
+          confirmed_at?: string
+          confirmed_by?: string
+          instructions?: string
+          latitude?: number | null
+          locality?: string
+          longitude?: number | null
+          postal_code?: string
+          source?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "booking_private_locations_booking_id_fkey"
+            columns: ["booking_id"]
+            isOneToOne: true
+            referencedRelation: "bookings"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "booking_private_locations_confirmed_by_fkey"
+            columns: ["confirmed_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       booking_requests: {
         Row: {
           booking_id: string | null
@@ -322,6 +379,73 @@ export type Database = {
             columns: ["series_id"]
             isOneToOne: true
             referencedRelation: "booking_series"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      booking_reschedule_requests: {
+        Row: {
+          booking_id: string
+          created_at: string
+          decided_at: string | null
+          decided_by: string | null
+          expires_at: string
+          id: string
+          proposed_by: string
+          proposed_ends_at: string
+          proposed_starts_at: string
+          reason: string
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          booking_id: string
+          created_at?: string
+          decided_at?: string | null
+          decided_by?: string | null
+          expires_at: string
+          id?: string
+          proposed_by: string
+          proposed_ends_at: string
+          proposed_starts_at: string
+          reason?: string
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          booking_id?: string
+          created_at?: string
+          decided_at?: string | null
+          decided_by?: string | null
+          expires_at?: string
+          id?: string
+          proposed_by?: string
+          proposed_ends_at?: string
+          proposed_starts_at?: string
+          reason?: string
+          status?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "booking_reschedule_requests_booking_id_fkey"
+            columns: ["booking_id"]
+            isOneToOne: false
+            referencedRelation: "bookings"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "booking_reschedule_requests_decided_by_fkey"
+            columns: ["decided_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "booking_reschedule_requests_proposed_by_fkey"
+            columns: ["proposed_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
             referencedColumns: ["id"]
           },
         ]
@@ -511,6 +635,66 @@ export type Database = {
           },
         ]
       }
+      calendar_event_links: {
+        Row: {
+          booking_id: string
+          calendar_id: string
+          created_at: string
+          external_event_id: string
+          ical_uid: string
+          last_error: string | null
+          last_synced_at: string | null
+          provider: string
+          sequence: number
+          sync_status: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          booking_id: string
+          calendar_id?: string
+          created_at?: string
+          external_event_id: string
+          ical_uid: string
+          last_error?: string | null
+          last_synced_at?: string | null
+          provider?: string
+          sequence?: number
+          sync_status?: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          booking_id?: string
+          calendar_id?: string
+          created_at?: string
+          external_event_id?: string
+          ical_uid?: string
+          last_error?: string | null
+          last_synced_at?: string | null
+          provider?: string
+          sequence?: number
+          sync_status?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "calendar_event_links_booking_id_fkey"
+            columns: ["booking_id"]
+            isOneToOne: false
+            referencedRelation: "bookings"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "calendar_event_links_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       cancellations: {
         Row: {
           booking_id: string
@@ -591,6 +775,38 @@ export type Database = {
           },
         ]
       }
+      client_rewards: {
+        Row: {
+          commission_discount_bps: number
+          consumer_id: string
+          qualifying_review_count: number
+          tier: string
+          updated_at: string
+        }
+        Insert: {
+          commission_discount_bps?: number
+          consumer_id: string
+          qualifying_review_count?: number
+          tier?: string
+          updated_at?: string
+        }
+        Update: {
+          commission_discount_bps?: number
+          consumer_id?: string
+          qualifying_review_count?: number
+          tier?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "client_rewards_consumer_id_fkey"
+            columns: ["consumer_id"]
+            isOneToOne: true
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       coach_profiles: {
         Row: {
           bio: string
@@ -601,8 +817,8 @@ export type Database = {
           languages: string[]
           latitude: number | null
           longitude: number | null
-          mode: Database["public"]["Enums"]["service_mode"]
           min_booking_notice_minutes: number
+          mode: Database["public"]["Enums"]["service_mode"]
           preferred_video_provider: string
           rating: number
           responds_now: boolean
@@ -627,8 +843,8 @@ export type Database = {
           languages?: string[]
           latitude?: number | null
           longitude?: number | null
-          mode?: Database["public"]["Enums"]["service_mode"]
           min_booking_notice_minutes?: number
+          mode?: Database["public"]["Enums"]["service_mode"]
           preferred_video_provider?: string
           rating?: number
           responds_now?: boolean
@@ -653,8 +869,8 @@ export type Database = {
           languages?: string[]
           latitude?: number | null
           longitude?: number | null
-          mode?: Database["public"]["Enums"]["service_mode"]
           min_booking_notice_minutes?: number
+          mode?: Database["public"]["Enums"]["service_mode"]
           preferred_video_provider?: string
           rating?: number
           responds_now?: boolean
@@ -738,12 +954,15 @@ export type Database = {
           duration_minutes: number
           expiry_days: number | null
           id: string
+          location_policy: string
           mode: Database["public"]["Enums"]["service_mode"]
           name: string
           offer_type: string
           package_size: number
           price_cents: number
+          public_area_label: string | null
           recurring_schedule_mode: string
+          request_booking_notice_minutes: number
         }
         Insert: {
           acceptance_window_hours?: number
@@ -760,12 +979,15 @@ export type Database = {
           duration_minutes: number
           expiry_days?: number | null
           id?: string
+          location_policy?: string
           mode: Database["public"]["Enums"]["service_mode"]
           name: string
           offer_type?: string
           package_size?: number
           price_cents: number
+          public_area_label?: string | null
           recurring_schedule_mode?: string
+          request_booking_notice_minutes?: number
         }
         Update: {
           acceptance_window_hours?: number
@@ -782,12 +1004,15 @@ export type Database = {
           duration_minutes?: number
           expiry_days?: number | null
           id?: string
+          location_policy?: string
           mode?: Database["public"]["Enums"]["service_mode"]
           name?: string
           offer_type?: string
           package_size?: number
           price_cents?: number
+          public_area_label?: string | null
           recurring_schedule_mode?: string
+          request_booking_notice_minutes?: number
         }
         Relationships: [
           {
@@ -803,6 +1028,183 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "coach_profiles"
             referencedColumns: ["user_id"]
+          },
+        ]
+      }
+      communication_deliveries: {
+        Row: {
+          attempts: number
+          available_at: string
+          channel: string
+          created_at: string
+          event_id: string
+          id: string
+          last_error: string | null
+          locale: string
+          locked_at: string | null
+          metadata: Json
+          provider_message_id: string | null
+          sent_at: string | null
+          status: string
+          template_key: string
+          updated_at: string
+          user_id: string | null
+        }
+        Insert: {
+          attempts?: number
+          available_at?: string
+          channel: string
+          created_at?: string
+          event_id: string
+          id?: string
+          last_error?: string | null
+          locale?: string
+          locked_at?: string | null
+          metadata?: Json
+          provider_message_id?: string | null
+          sent_at?: string | null
+          status?: string
+          template_key: string
+          updated_at?: string
+          user_id?: string | null
+        }
+        Update: {
+          attempts?: number
+          available_at?: string
+          channel?: string
+          created_at?: string
+          event_id?: string
+          id?: string
+          last_error?: string | null
+          locale?: string
+          locked_at?: string | null
+          metadata?: Json
+          provider_message_id?: string | null
+          sent_at?: string | null
+          status?: string
+          template_key?: string
+          updated_at?: string
+          user_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "communication_deliveries_event_id_fkey"
+            columns: ["event_id"]
+            isOneToOne: false
+            referencedRelation: "communication_events"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "communication_deliveries_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      communication_events: {
+        Row: {
+          actor_id: string | null
+          aggregate_id: string | null
+          aggregate_type: string
+          attempts: number
+          available_at: string
+          completed_at: string | null
+          created_at: string
+          id: string
+          idempotency_key: string
+          kind: string
+          last_error: string | null
+          locked_at: string | null
+          payload: Json
+          status: string
+        }
+        Insert: {
+          actor_id?: string | null
+          aggregate_id?: string | null
+          aggregate_type: string
+          attempts?: number
+          available_at?: string
+          completed_at?: string | null
+          created_at?: string
+          id?: string
+          idempotency_key: string
+          kind: string
+          last_error?: string | null
+          locked_at?: string | null
+          payload?: Json
+          status?: string
+        }
+        Update: {
+          actor_id?: string | null
+          aggregate_id?: string | null
+          aggregate_type?: string
+          attempts?: number
+          available_at?: string
+          completed_at?: string | null
+          created_at?: string
+          id?: string
+          idempotency_key?: string
+          kind?: string
+          last_error?: string | null
+          locked_at?: string | null
+          payload?: Json
+          status?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "communication_events_actor_id_fkey"
+            columns: ["actor_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      conversation_read_states: {
+        Row: {
+          conversation_id: string
+          last_read_at: string
+          last_read_message_id: string | null
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          conversation_id: string
+          last_read_at?: string
+          last_read_message_id?: string | null
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          conversation_id?: string
+          last_read_at?: string
+          last_read_message_id?: string | null
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "conversation_read_states_conversation_id_fkey"
+            columns: ["conversation_id"]
+            isOneToOne: false
+            referencedRelation: "conversations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "conversation_read_states_last_read_message_id_fkey"
+            columns: ["last_read_message_id"]
+            isOneToOne: false
+            referencedRelation: "messages"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "conversation_read_states_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
           },
         ]
       }
@@ -899,8 +1301,39 @@ export type Database = {
           },
         ]
       }
+      email_suppressions: {
+        Row: {
+          created_at: string
+          provider_event_id: string | null
+          reason: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          provider_event_id?: string | null
+          reason: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          provider_event_id?: string | null
+          reason?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "email_suppressions_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: true
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       integration_connections: {
         Row: {
+          calendar_enabled: boolean
+          calendar_id: string
           created_at: string
           encrypted_access_token: string | null
           encrypted_refresh_token: string | null
@@ -912,6 +1345,8 @@ export type Database = {
           user_id: string
         }
         Insert: {
+          calendar_enabled?: boolean
+          calendar_id?: string
           created_at?: string
           encrypted_access_token?: string | null
           encrypted_refresh_token?: string | null
@@ -923,6 +1358,8 @@ export type Database = {
           user_id: string
         }
         Update: {
+          calendar_enabled?: boolean
+          calendar_id?: string
           created_at?: string
           encrypted_access_token?: string | null
           encrypted_refresh_token?: string | null
@@ -1137,13 +1574,50 @@ export type Database = {
           },
         ]
       }
+      notification_preferences: {
+        Row: {
+          category: string
+          email_enabled: boolean
+          in_app_enabled: boolean
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          category: string
+          email_enabled?: boolean
+          in_app_enabled?: boolean
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          category?: string
+          email_enabled?: boolean
+          in_app_enabled?: boolean
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "notification_preferences_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       notifications: {
         Row: {
           action_url: string | null
           body: string
+          category: string
           created_at: string
+          dedupe_key: string | null
+          event_id: string | null
           id: string
           kind: string
+          metadata: Json
+          priority: string
           read_at: string | null
           title: string
           user_id: string
@@ -1151,9 +1625,14 @@ export type Database = {
         Insert: {
           action_url?: string | null
           body?: string
+          category?: string
           created_at?: string
+          dedupe_key?: string | null
+          event_id?: string | null
           id?: string
           kind: string
+          metadata?: Json
+          priority?: string
           read_at?: string | null
           title: string
           user_id: string
@@ -1161,14 +1640,26 @@ export type Database = {
         Update: {
           action_url?: string | null
           body?: string
+          category?: string
           created_at?: string
+          dedupe_key?: string | null
+          event_id?: string | null
           id?: string
           kind?: string
+          metadata?: Json
+          priority?: string
           read_at?: string | null
           title?: string
           user_id?: string
         }
         Relationships: [
+          {
+            foreignKeyName: "notifications_event_id_fkey"
+            columns: ["event_id"]
+            isOneToOne: false
+            referencedRelation: "communication_events"
+            referencedColumns: ["id"]
+          },
           {
             foreignKeyName: "notifications_user_id_fkey"
             columns: ["user_id"]
@@ -1184,6 +1675,7 @@ export type Database = {
           authorization_expires_at: string | null
           booking_id: string | null
           capture_method: string
+          client_reward_tier: string
           coach_id: string
           consumer_id: string
           created_at: string
@@ -1192,9 +1684,11 @@ export type Database = {
           idempotency_key: string | null
           package_id: string | null
           platform_fee_cents: number
+          platform_fee_rate_bps: number
           status: string
           stripe_checkout_session_id: string | null
           stripe_payment_intent_id: string | null
+          stripe_receipt_url: string | null
           stripe_refund_id: string | null
           updated_at: string
         }
@@ -1203,6 +1697,7 @@ export type Database = {
           authorization_expires_at?: string | null
           booking_id?: string | null
           capture_method?: string
+          client_reward_tier?: string
           coach_id: string
           consumer_id: string
           created_at?: string
@@ -1211,9 +1706,11 @@ export type Database = {
           idempotency_key?: string | null
           package_id?: string | null
           platform_fee_cents: number
+          platform_fee_rate_bps?: number
           status?: string
           stripe_checkout_session_id?: string | null
           stripe_payment_intent_id?: string | null
+          stripe_receipt_url?: string | null
           stripe_refund_id?: string | null
           updated_at?: string
         }
@@ -1222,6 +1719,7 @@ export type Database = {
           authorization_expires_at?: string | null
           booking_id?: string | null
           capture_method?: string
+          client_reward_tier?: string
           coach_id?: string
           consumer_id?: string
           created_at?: string
@@ -1230,9 +1728,11 @@ export type Database = {
           idempotency_key?: string | null
           package_id?: string | null
           platform_fee_cents?: number
+          platform_fee_rate_bps?: number
           status?: string
           stripe_checkout_session_id?: string | null
           stripe_payment_intent_id?: string | null
+          stripe_receipt_url?: string | null
           stripe_refund_id?: string | null
           updated_at?: string
         }
@@ -1276,6 +1776,7 @@ export type Database = {
           id: string
           locale: string
           role: Database["public"]["Enums"]["user_role"]
+          timezone: string
           updated_at: string
         }
         Insert: {
@@ -1286,6 +1787,7 @@ export type Database = {
           id: string
           locale?: string
           role?: Database["public"]["Enums"]["user_role"]
+          timezone?: string
           updated_at?: string
         }
         Update: {
@@ -1296,6 +1798,7 @@ export type Database = {
           id?: string
           locale?: string
           role?: Database["public"]["Enums"]["user_role"]
+          timezone?: string
           updated_at?: string
         }
         Relationships: []
@@ -1430,6 +1933,30 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      resend_webhook_events: {
+        Row: {
+          created_at: string
+          event_type: string
+          id: string
+          payload: Json
+          processed_at: string | null
+        }
+        Insert: {
+          created_at?: string
+          event_type: string
+          id: string
+          payload?: Json
+          processed_at?: string | null
+        }
+        Update: {
+          created_at?: string
+          event_type?: string
+          id?: string
+          payload?: Json
+          processed_at?: string | null
+        }
+        Relationships: []
       }
       review_replies: {
         Row: {
@@ -1580,6 +2107,47 @@ export type Database = {
             columns: ["subject_id"]
             isOneToOne: false
             referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      service_private_locations: {
+        Row: {
+          address_line: string
+          instructions: string
+          latitude: number | null
+          locality: string
+          longitude: number | null
+          postal_code: string
+          service_id: string
+          updated_at: string
+        }
+        Insert: {
+          address_line: string
+          instructions?: string
+          latitude?: number | null
+          locality: string
+          longitude?: number | null
+          postal_code?: string
+          service_id: string
+          updated_at?: string
+        }
+        Update: {
+          address_line?: string
+          instructions?: string
+          latitude?: number | null
+          locality?: string
+          longitude?: number | null
+          postal_code?: string
+          service_id?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "service_private_locations_service_id_fkey"
+            columns: ["service_id"]
+            isOneToOne: true
+            referencedRelation: "coach_services"
             referencedColumns: ["id"]
           },
         ]
@@ -1752,7 +2320,13 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      accept_booking_reschedule: {
+        Args: { p_request_id: string; p_user_id: string }
+        Returns: Json
+      }
       advance_training_lifecycle: { Args: never; Returns: Json }
+      claim_communication_delivery: { Args: never; Returns: Json }
+      claim_communication_event: { Args: never; Returns: Json }
       claim_lifecycle_job: { Args: never; Returns: Json }
       create_package_booking: {
         Args: {
@@ -1841,6 +2415,19 @@ export type Database = {
           p_timezone?: string
         }
         Returns: Json
+      }
+      finish_communication_delivery: {
+        Args: {
+          p_delivery_id: string
+          p_error?: string
+          p_provider_message_id?: string
+          p_status: string
+        }
+        Returns: boolean
+      }
+      finish_communication_event: {
+        Args: { p_error?: string; p_event_id: string }
+        Returns: boolean
       }
       finish_lifecycle_job: {
         Args: { p_error?: string; p_job_id: number }

@@ -14,7 +14,10 @@ class Settings(BaseSettings):
     platform_fee_percent: int = 15
     resend_api_key: str = ""
     email_from: str = ""
+    email_reply_to: str = ""
     email_test_recipient: str = ""
+    resend_webhook_secret: str = ""
+    operations_email: str = ""
     oauth_client_id: str = ""
     oauth_client_secret: str = ""
     oauth_redirect_uris: str = ""

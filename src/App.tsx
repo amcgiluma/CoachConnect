@@ -63,6 +63,7 @@ export type Profile = {
   city?: string | null
   avatar_url?: string | null
   updated_at?: string
+  timezone?: string
 }
 type AvailableSlot = { starts_at: string; ends_at: string; label: string; occurrences?: string[] }
 type ChatMessage = {
@@ -121,6 +122,14 @@ type CoachServiceRecord = {
   available_start_time?: string
   available_end_time?: string
   categories?: { slug?: string; name_es?: string } | null
+  location_policy?: 'fixed_private' | 'travel' | 'agreed'
+  public_area_label?: string | null
+  private_location?: {
+    address_line: string
+    locality: string
+    postal_code?: string
+    instructions?: string
+  } | null
 }
 type CoachProfileRecord = {
   user_id: string
@@ -153,7 +162,7 @@ type BookingRecord = {
   coach_id?: string
   outcome_status?: string | null
   outcome_finalized_at?: string | null
-  coach_services?: { name?: string; description?: string; duration_minutes?: number; mode?: Mode } | null
+  coach_services?: { name?: string; description?: string; duration_minutes?: number; mode?: Mode; location_policy?: string; public_area_label?: string | null } | null
   profiles?: { display_name?: string } | null
   coach_profiles?: { headline?: string; profiles?: { display_name?: string } | null } | null
   session_reports?: Array<{ id: string; author_id: string; outcome: string }>
@@ -161,6 +170,21 @@ type BookingRecord = {
     id: string
     author_id: string
     revealed_at?: string | null
+  }>
+  private_location?: {
+    address_line: string
+    locality: string
+    postal_code?: string
+    instructions?: string
+  } | null
+  booking_reschedule_requests?: Array<{
+    id: string
+    proposed_by: string
+    proposed_starts_at: string
+    proposed_ends_at: string
+    reason?: string
+    status: 'pending' | 'accepted' | 'rejected' | 'expired' | 'cancelled'
+    expires_at: string
   }>
 }
 type ProfessionalOverviewData = {
@@ -1787,6 +1811,9 @@ function CancellationDialog({ booking, onClose, onConfirm }: { booking: BookingR
 }
 
 export function BookingDetailsDialog({ booking, perspective, onClose }: { booking: BookingRecord; perspective: 'coach' | 'consumer'; onClose: () => void }) {
+  const [rescheduleOpen, setRescheduleOpen] = useState(false)
+  const [locationOpen, setLocationOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
   const startsAt = new Date(booking.starts_at)
   const endsAt = new Date(booking.ends_at)
   const duration = booking.coach_services?.duration_minutes || Math.round((endsAt.getTime() - startsAt.getTime()) / 60000)
@@ -1794,6 +1821,50 @@ export function BookingDetailsDialog({ booking, perspective, onClose }: { bookin
     ? booking.profiles?.display_name || 'Cliente CoachConnect'
     : booking.coach_profiles?.profiles?.display_name || 'Entrenador CoachConnect'
   const status = ({ pending_payment: 'Pago pendiente', confirmed: 'Confirmada', completed: 'Completada', cancelled: 'Cancelada', disputed: 'En revisión', refunded: 'Reembolsada' } as Record<string, string>)[booking.status] || booking.status
+  const ownId = perspective === 'coach' ? booking.coach_id : booking.consumer_id
+  const pendingReschedule = booking.booking_reschedule_requests?.find((request) => request.status === 'pending')
+  const canChange = booking.status === 'confirmed' && startsAt.getTime() - Date.now() >= 86400000
+  const decideReschedule = async (decision: 'accept' | 'reject') => {
+    if (!pendingReschedule) return
+    setBusy(true)
+    try {
+      await api(`/api/v1/bookings/reschedule-requests/${pendingReschedule.id}/decision`, { method: 'POST', body: JSON.stringify({ decision }) })
+      toast.success(decision === 'accept' ? 'Nuevo horario confirmado. Ambos recibiréis los detalles actualizados.' : 'Cambio rechazado. Se mantiene el horario original.')
+      onClose()
+    } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo responder') }
+    finally { setBusy(false) }
+  }
+  const proposeReschedule = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const form = new FormData(event.currentTarget)
+    const value = String(form.get('starts_at') || '')
+    if (!value) return
+    setBusy(true)
+    try {
+      await api(`/api/v1/bookings/${booking.id}/reschedule-requests`, { method: 'POST', body: JSON.stringify({ starts_at: new Date(value).toISOString(), reason: form.get('reason') }) })
+      toast.success('Propuesta enviada. El horario solo cambiará si la otra persona la acepta.')
+      onClose()
+    } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo proponer el cambio') }
+    finally { setBusy(false) }
+  }
+  const saveLocation = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const form = new FormData(event.currentTarget)
+    setBusy(true)
+    try {
+      await api(`/api/v1/bookings/${booking.id}/location`, { method: 'PUT', body: JSON.stringify(Object.fromEntries(form)) })
+      toast.success('Ubicación confirmada. El cliente recibirá la dirección y el calendario se actualizará.')
+      onClose()
+    } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo guardar la ubicación') }
+    finally { setBusy(false) }
+  }
+  const calendarStamp = (date: Date) => date.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '')
+  const calendarUrl = `https://calendar.google.com/calendar/render?${new URLSearchParams({
+    action: 'TEMPLATE', text: booking.coach_services?.name || 'Entrenamiento CoachConnect',
+    dates: `${calendarStamp(startsAt)}/${calendarStamp(endsAt)}`,
+    details: booking.video_url || `${window.location.origin}/cuenta`,
+    location: booking.private_location ? `${booking.private_location.address_line}, ${booking.private_location.locality}` : booking.coach_services?.public_area_label || '',
+  }).toString()}`
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
     <section className="booking-detail-dialog" role="dialog" aria-modal="true" aria-labelledby="booking-detail-title">
       <header>
@@ -1814,8 +1885,14 @@ export function BookingDetailsDialog({ booking, perspective, onClose }: { bookin
         <p className="eyebrow">Detalles del entrenamiento</p>
         <p>{booking.notes || booking.coach_services?.description || 'No hay indicaciones adicionales para esta sesión.'}</p>
       </div>
+      {booking.private_location && <div className="booking-training-detail booking-location-detail"><p className="eyebrow">Lugar confirmado</p><p><MapPin /> <strong>{booking.private_location.address_line}, {booking.private_location.locality}{booking.private_location.postal_code ? ` · ${booking.private_location.postal_code}` : ''}</strong></p>{booking.private_location.instructions && <small>{booking.private_location.instructions}</small>}</div>}
+      {!booking.private_location && booking.coach_services?.mode !== 'online' && <div className="booking-training-detail booking-location-detail"><p className="eyebrow">Ubicación</p><p><MapPin /> {booking.coach_services?.public_area_label || 'La dirección exacta se acordará antes de la sesión.'}</p></div>}
+      {pendingReschedule && <div className="reschedule-status"><CalendarDays /><span><strong>{pendingReschedule.proposed_by === ownId ? 'Esperando respuesta a tu propuesta' : 'Te han propuesto un nuevo horario'}</strong><small>{new Date(pendingReschedule.proposed_starts_at).toLocaleString('es-ES', { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' })}{pendingReschedule.reason ? ` · ${pendingReschedule.reason}` : ''}</small></span>{pendingReschedule.proposed_by !== ownId && <div><button type="button" className="text-button visible-text-button" disabled={busy} onClick={() => decideReschedule('reject')}>Rechazar</button><Button type="button" disabled={busy} onClick={() => decideReschedule('accept')}>Aceptar</Button></div>}</div>}
+      {rescheduleOpen && !pendingReschedule && <form className="inline-booking-form" onSubmit={proposeReschedule}><label>Nueva fecha y hora<input name="starts_at" type="datetime-local" required min={new Date(Date.now() + 86400000).toISOString().slice(0, 16)} /></label><label>Motivo o contexto<input name="reason" maxLength={500} placeholder="Opcional" /></label><div><button type="button" className="text-button visible-text-button" onClick={() => setRescheduleOpen(false)}>Cerrar</button><Button type="submit" disabled={busy}>Enviar propuesta</Button></div></form>}
+      {locationOpen && perspective === 'coach' && <form className="inline-booking-form" onSubmit={saveLocation}><label>Dirección exacta<input name="address_line" required maxLength={240} defaultValue={booking.private_location?.address_line || ''} /></label><label>Localidad<input name="locality" required maxLength={120} defaultValue={booking.private_location?.locality || ''} /></label><label>Código postal<input name="postal_code" maxLength={20} defaultValue={booking.private_location?.postal_code || ''} /></label><label className="wide">Indicaciones<textarea name="instructions" maxLength={1000} rows={2} defaultValue={booking.private_location?.instructions || ''} /></label><div><button type="button" className="text-button visible-text-button" onClick={() => setLocationOpen(false)}>Cerrar</button><Button type="submit" disabled={busy}>Confirmar lugar</Button></div></form>}
       <footer>
-        {booking.video_url ? <a className="button button-primary button-md" href={booking.video_url} target="_blank" rel="noreferrer"><Video /> Entrar a la videollamada</a> : <span><ShieldCheck /> {booking.coach_services?.mode === 'online' ? 'El enlace aparecerá aquí cuando esté preparado.' : 'Sin enlace de videollamada para esta sesión.'}</span>}
+        <div>{booking.video_url ? <a className="button button-primary button-md" href={booking.video_url} target="_blank" rel="noreferrer"><Video /> Entrar a la videollamada</a> : <span><ShieldCheck /> {booking.coach_services?.mode === 'online' ? 'El enlace aparecerá aquí cuando esté preparado.' : 'Sesión presencial.'}</span>}</div>
+        <div className="booking-detail-actions"><a className="login-button" href={calendarUrl} target="_blank" rel="noreferrer"><CalendarDays /> Añadir a Calendar</a>{canChange && !pendingReschedule && <button type="button" className="login-button" onClick={() => { setRescheduleOpen((value) => !value); setLocationOpen(false) }}><Clock3 /> Proponer cambio</button>}{perspective === 'coach' && canChange && booking.coach_services?.mode !== 'online' && <button type="button" className="login-button" onClick={() => { setLocationOpen((value) => !value); setRescheduleOpen(false) }}><MapPin /> {booking.private_location ? 'Editar lugar' : 'Confirmar lugar'}</button>}</div>
       </footer>
     </section>
   </div>
@@ -1927,7 +2004,13 @@ export function AccountIdentity({ profile, userId, onSaved }: { profile: Profile
     if (!city) return toast.error('Selecciona una ciudad de la lista de coincidencias.')
     setBusy(true)
     try {
-      const updated = await api<Profile>('/api/v1/me', { method: 'PATCH', body: JSON.stringify({ display_name: form.get('display_name'), city, avatar_url: avatarUrl || null }) })
+      const updated = await api<Profile>('/api/v1/me', {
+        method: 'PATCH',
+        body: JSON.stringify({
+          display_name: form.get('display_name'), city, avatar_url: avatarUrl || null,
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || profile.timezone || 'Europe/Madrid',
+        }),
+      })
       onSaved(updated)
       setStagedAvatarPath(null)
       setEditing(false)
@@ -2222,6 +2305,7 @@ function Messages({ onAuth }: { onAuth: () => void }) {
       .then((rows) => {
         setMessages(rows)
         setLoadError('')
+        void api(`/api/v1/conversations/${active}/read`, { method: 'POST' }).catch(() => undefined)
       })
       .catch((error) => setLoadError(error instanceof Error ? error.message : 'No se pudieron cargar los mensajes'))
     const channel = supabase
@@ -2234,7 +2318,11 @@ function Messages({ onAuth }: { onAuth: () => void }) {
           table: 'messages',
           filter: `conversation_id=eq.${active}`,
         },
-        (payload) => setMessages((current) => mergeMessage(current, payload.new as ChatMessage)),
+        (payload) => {
+          const incoming = payload.new as ChatMessage
+          setMessages((current) => mergeMessage(current, incoming))
+          if (incoming.sender_id !== user?.id) void api(`/api/v1/conversations/${active}/read`, { method: 'POST' }).catch(() => undefined)
+        },
       )
       .subscribe()
     return () => {
@@ -2477,6 +2565,84 @@ function Messages({ onAuth }: { onAuth: () => void }) {
   )
 }
 
+type NotificationPreference = {
+  category: 'chat' | 'reminders' | 'reviews' | 'summaries'
+  email_enabled: boolean
+  in_app_enabled: boolean
+}
+
+type ConnectedIntegration = {
+  provider: 'google' | 'zoom'
+  calendar_enabled?: boolean
+  calendar_id?: string
+}
+
+function CommunicationSettings() {
+  const [preferences, setPreferences] = useState<NotificationPreference[]>([])
+  const [connections, setConnections] = useState<ConnectedIntegration[]>([])
+  const [busyKey, setBusyKey] = useState('')
+  useEffect(() => {
+    Promise.all([
+      api<NotificationPreference[]>('/api/v1/notification-preferences'),
+      api<{ providers: ConnectedIntegration[] }>('/api/v1/integrations'),
+    ]).then(([nextPreferences, integrations]) => {
+      setPreferences(nextPreferences)
+      setConnections(integrations.providers)
+    }).catch(() => undefined)
+  }, [])
+  const updatePreference = async (preference: NotificationPreference, channel: 'email_enabled' | 'in_app_enabled') => {
+    const next = { ...preference, [channel]: !preference[channel] }
+    setBusyKey(`${preference.category}:${channel}`)
+    try {
+      const saved = await api<NotificationPreference>('/api/v1/notification-preferences', { method: 'PATCH', body: JSON.stringify(next) })
+      setPreferences((items) => items.map((item) => item.category === saved.category ? saved : item))
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'No se pudo guardar la preferencia')
+    } finally { setBusyKey('') }
+  }
+  const connectGoogle = async () => {
+    setBusyKey('google')
+    try {
+      const result = await api<{ url: string }>('/api/v1/integrations/google/oauth-url')
+      window.location.assign(result.url)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'No se pudo conectar Google')
+      setBusyKey('')
+    }
+  }
+  const google = connections.find((connection) => connection.provider === 'google')
+  const toggleCalendar = async () => {
+    if (!google) return void connectGoogle()
+    setBusyKey('calendar')
+    try {
+      const saved = await api<ConnectedIntegration>('/api/v1/integrations/google/calendar', {
+        method: 'PATCH', body: JSON.stringify({ enabled: !google.calendar_enabled, calendar_id: google.calendar_id || 'primary' }),
+      })
+      setConnections((items) => items.map((item) => item.provider === 'google' ? saved : item))
+      toast.success(saved.calendar_enabled ? 'Las reservas se añadirán a Google Calendar' : 'Sincronización de calendario desactivada')
+    } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo actualizar Calendar') }
+    finally { setBusyKey('') }
+  }
+  const labels: Record<NotificationPreference['category'], [string, string]> = {
+    chat: ['Mensajes sin leer', 'Un resumen por correo tras 15 minutos; se cancela si ya has leído la conversación.'],
+    reminders: ['Recordatorios de sesiones', 'Avisos 24 horas y 1 hora antes del entrenamiento.'],
+    reviews: ['Valoraciones', 'Recordatorios para dejar una valoración después del entrenamiento.'],
+    summaries: ['Resúmenes de actividad', 'Novedades agrupadas que no requieren una acción inmediata.'],
+  }
+  return <section className="communication-settings">
+    <div><p className="eyebrow">Preferencias</p><h2>Decide qué avisos recibes.</h2><p>Pagos, cambios de reserva, seguridad y moderación son esenciales y se envían siempre. El resto lo controlas aquí.</p></div>
+    <div className="preference-table">
+      <div className="preference-head"><span>Tipo de aviso</span><span>Correo</span><span>En la app</span></div>
+      {preferences.map((preference) => <div className="preference-row" key={preference.category}>
+        <span><strong>{labels[preference.category][0]}</strong><small>{labels[preference.category][1]}</small></span>
+        <button type="button" className={preference.email_enabled ? 'switch active' : 'switch'} aria-pressed={preference.email_enabled} aria-label={`Correo para ${labels[preference.category][0]}`} disabled={Boolean(busyKey)} onClick={() => updatePreference(preference, 'email_enabled')}><span /></button>
+        <button type="button" className={preference.in_app_enabled ? 'switch active' : 'switch'} aria-pressed={preference.in_app_enabled} aria-label={`Notificación en la app para ${labels[preference.category][0]}`} disabled={Boolean(busyKey)} onClick={() => updatePreference(preference, 'in_app_enabled')}><span /></button>
+      </div>)}
+    </div>
+    <div className="calendar-connection"><CalendarDays /><span><strong>Google Calendar</strong><small>{google ? google.calendar_enabled ? 'Activo: las reservas confirmadas y sus cambios se sincronizan automáticamente.' : 'Google está conectado, pero la sincronización está pausada.' : 'Conecta Google para añadir y actualizar automáticamente tus entrenamientos.'}</small></span><Button type="button" onClick={toggleCalendar} disabled={Boolean(busyKey)}>{busyKey === 'calendar' || busyKey === 'google' ? <LoaderCircle className="spin" /> : google?.calendar_enabled ? <Check /> : <Plus />}{google?.calendar_enabled ? 'Activo' : google ? 'Activar' : 'Conectar'}</Button></div>
+  </section>
+}
+
 function Notifications({ onAuth }: { onAuth: () => void }) {
   const { user, loading } = useAuth()
   const [items, setItems] = useState<any[]>([])
@@ -2519,6 +2685,7 @@ function Notifications({ onAuth }: { onAuth: () => void }) {
           <h1>Notificaciones.</h1>
         </div>
       </div>
+      <CommunicationSettings />
       <div className="notification-list">
         {items.map((item) => (
           <button key={item.id} className={item.read_at ? 'read' : 'unread'} onClick={() => open(item)}>
@@ -2879,6 +3046,8 @@ function ServicesForm() {
   const [availableStartTime, setAvailableStartTime] = useState('09:00')
   const [availableEndTime, setAvailableEndTime] = useState('19:00')
   const [bookingWindowDays, setBookingWindowDays] = useState(60)
+  const [serviceMode, setServiceMode] = useState<Mode>('online')
+  const [locationPolicy, setLocationPolicy] = useState<'fixed_private' | 'travel' | 'agreed'>('agreed')
   useEffect(() => {
     api<CoachServiceRecord[]>('/api/v1/coach/services')
       .then((items) => {
@@ -2927,6 +3096,12 @@ function ServicesForm() {
       available_weekdays: availableWeekdays,
       available_start_time: availableStartTime,
       available_end_time: availableEndTime,
+      location_policy: serviceMode === 'online' ? 'agreed' : locationPolicy,
+      public_area_label: serviceMode === 'online' ? null : String(form.get('public_area_label') || '').trim() || null,
+      private_address_line: locationPolicy === 'fixed_private' ? String(form.get('private_address_line') || '').trim() || null : null,
+      private_locality: locationPolicy === 'fixed_private' ? String(form.get('private_locality') || '').trim() || null : null,
+      private_postal_code: locationPolicy === 'fixed_private' ? String(form.get('private_postal_code') || '').trim() : '',
+      private_location_instructions: locationPolicy === 'fixed_private' ? String(form.get('private_location_instructions') || '').trim() : '',
       ...(offerType === 'recurring_plan' ? { recurring_schedule_mode: recurringScheduleMode } : {}),
     }
     setBusy(true)
@@ -2964,6 +3139,8 @@ function ServicesForm() {
     setAvailableStartTime(item.available_start_time?.slice(0, 5) || '00:00')
     setAvailableEndTime(item.available_end_time?.slice(0, 5) || '23:59')
     setBookingWindowDays(item.booking_window_days || 31)
+    setServiceMode(item.mode)
+    setLocationPolicy(item.location_policy || 'agreed')
     setFormOpen(true)
   }
   const create = () => {
@@ -2974,6 +3151,8 @@ function ServicesForm() {
     setAvailableStartTime('09:00')
     setAvailableEndTime('19:00')
     setBookingWindowDays(60)
+    setServiceMode('online')
+    setLocationPolicy('agreed')
     setFormOpen(true)
   }
   if (!loaded) return <LoadingBlock label="Cargando tus servicios" />
@@ -3037,12 +3216,46 @@ function ServicesForm() {
             </label>
             <label>
               Modalidad
-              <select name="mode" defaultValue={editing?.mode || 'online'}>
+              <select name="mode" value={serviceMode} onChange={(event) => setServiceMode(event.target.value as Mode)}>
                 <option value="online">Online</option>
                 <option value="presencial">Presencial</option>
                 <option value="hibrido">Híbrido</option>
               </select>
             </label>
+            {serviceMode !== 'online' && <>
+              <label>
+                Cómo se decide el lugar
+                <select name="location_policy" value={locationPolicy} onChange={(event) => setLocationPolicy(event.target.value as typeof locationPolicy)}>
+                  <option value="agreed">Se acuerda después por el chat</option>
+                  <option value="travel">Me desplazo por una zona</option>
+                  <option value="fixed_private">Tengo una ubicación fija</option>
+                </select>
+              </label>
+              <label>
+                Zona pública aproximada
+                <input name="public_area_label" required={locationPolicy !== 'agreed'} maxLength={120} defaultValue={editing?.public_area_label || ''} placeholder="Ej. Chamberí, Madrid" />
+                <small>Esta zona sí se muestra antes de reservar. Nunca publiques aquí la dirección exacta.</small>
+              </label>
+              {locationPolicy === 'fixed_private' && <>
+                <label>
+                  Dirección exacta privada
+                  <input name="private_address_line" required maxLength={240} defaultValue={editing?.private_location?.address_line || ''} autoComplete="street-address" />
+                </label>
+                <label>
+                  Localidad
+                  <input name="private_locality" required maxLength={120} defaultValue={editing?.private_location?.locality || ''} autoComplete="address-level2" />
+                </label>
+                <label>
+                  Código postal
+                  <input name="private_postal_code" maxLength={20} defaultValue={editing?.private_location?.postal_code || ''} autoComplete="postal-code" />
+                </label>
+                <label className="wide">
+                  Indicaciones para llegar
+                  <textarea name="private_location_instructions" rows={2} maxLength={1000} defaultValue={editing?.private_location?.instructions || ''} placeholder="Portal, recepción o punto de encuentro." />
+                  <small>Solo se comparte con el cliente cuando la reserva está confirmada.</small>
+                </label>
+              </>}
+            </>}
             <label>
               Duración por sesión (min)
               <input name="duration_minutes" type="number" min="20" max="240" defaultValue={editing?.duration_minutes || 60} />
@@ -3141,6 +3354,7 @@ function ServicesForm() {
                   <span>{item.expiry_days ? `${item.expiry_days} días` : item.mode}</span>
                   <span>{formatServiceWeekdays(item.available_weekdays || [0, 1, 2, 3, 4, 5, 6])}</span>
                   <span>{formatServiceHours(item.available_start_time, item.available_end_time)}</span>
+                  {item.mode !== 'online' && <span>{item.public_area_label || 'Lugar por acordar'}</span>}
                   <span>Hasta {item.booking_window_days || 31} días</span>
                   <strong>
                     {(item.price_cents / 100).toLocaleString('es-ES', {
@@ -3430,6 +3644,7 @@ function Integrations() {
     stripe_status?: 'not_connected' | 'pending' | 'active' | 'unavailable'
     stripe_requirements_due?: number
     providers: string[]
+    connections?: ConnectedIntegration[]
     custom_video_url?: string
   }
   const [status, setStatus] = useState<IntegrationStatus>({
@@ -3475,6 +3690,15 @@ function Integrations() {
     }
   }
   const stripeLabel = status.stripe ? 'Conectado · abrir panel de Stripe' : status.stripe_status === 'pending' ? `Completa la verificación${status.stripe_requirements_due ? ` · ${status.stripe_requirements_due} datos pendientes` : ''}` : status.stripe_status === 'unavailable' ? 'No se pudo comprobar el estado' : 'Recibe pagos y consulta tus ingresos'
+  const google = status.connections?.find((connection) => connection.provider === 'google')
+  const toggleCalendar = async () => {
+    if (!google) return void connect('google')
+    try {
+      const saved = await api<ConnectedIntegration>('/api/v1/integrations/google/calendar', { method: 'PATCH', body: JSON.stringify({ enabled: !google.calendar_enabled, calendar_id: google.calendar_id || 'primary' }) })
+      setStatus((current) => ({ ...current, connections: (current.connections || []).map((item) => item.provider === 'google' ? saved : item) }))
+      toast.success(saved.calendar_enabled ? 'Google Calendar activado' : 'Google Calendar pausado')
+    } catch (error) { toast.error(error instanceof Error ? error.message : 'No se pudo actualizar Calendar') }
+  }
   return (
     <section>
       <p className="eyebrow">Pagos y videollamadas</p>
@@ -3506,6 +3730,7 @@ function Integrations() {
           {status.providers.includes('zoom') ? <Check /> : <ArrowRight />}
         </button>
       </div>
+      <div className="calendar-connection professional-calendar-connection"><CalendarDays /><span><strong>Sincronizar agenda con Google Calendar</strong><small>{google?.calendar_enabled ? 'Tus sesiones se crean y se actualizan automáticamente. Los enlaces de Meet se generan desde el evento del entrenador.' : google ? 'La cuenta está conectada; activa la sincronización automática de reservas.' : 'Conecta Google para generar Meet y mantener tu calendario al día.'}</small></span><Button type="button" onClick={toggleCalendar}>{google?.calendar_enabled ? <Check /> : <Plus />}{google?.calendar_enabled ? 'Activo' : google ? 'Activar' : 'Conectar'}</Button></div>
       <form className="custom-link-form" onSubmit={saveCustom}>
         <label>
           Enlace personalizado HTTPS

@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 from contextlib import asynccontextmanager
 from datetime import datetime, time as datetime_time, timedelta, timezone
+import hashlib
+import hmac
+import json
 import logging
 import re
 import unicodedata
@@ -25,6 +30,10 @@ from .schemas import (
     AvailabilityExceptionRequest,
     AvailabilityRuleRequest,
     BlockUserRequest,
+    BookingLocationRequest,
+    BookingRescheduleCreateRequest,
+    BookingRescheduleDecisionRequest,
+    CalendarPreferenceUpdateRequest,
     BookingSettingsRequest,
     BookingDecisionRequest,
     CancellationRequest,
@@ -41,6 +50,7 @@ from .schemas import (
     MatchRequest,
     MatchResponse,
     MessageCreateRequest,
+    NotificationPreferenceUpdateRequest,
     OAuthUrlResponse,
     PackageCheckoutRequest,
     PackageCheckoutResponse,
@@ -57,6 +67,7 @@ from .schemas import (
     VideoReviewRequest,
     UserAccessRequest,
 )
+from .communications import process_communication_queue, publish_event, schedule_due_communications
 from .seed import CATEGORIES, COACHES
 from .services import (
     auth_admin_list_users,
@@ -73,8 +84,10 @@ from .services import (
     oauth_url,
     provision_meeting,
     refund_destination_payment,
+    snapshot_service_location,
     storage_signed_url,
     stripe_account_status,
+    stripe_receipt_url,
     validate_booking_schedule,
 )
 
@@ -462,6 +475,10 @@ async def me(user: AuthUser = Depends(current_user)) -> dict[str, Any]:
 
 @app.patch("/api/v1/me", tags=["account"])
 async def update_me(payload: ProfileUpdateRequest, user: AuthUser = Depends(current_user)) -> dict[str, Any]:
+    try:
+        ZoneInfo(payload.timezone)
+    except Exception as exc:
+        raise HTTPException(422, "Zona horaria no válida") from exc
     if payload.avatar_url:
         expected_prefix = f"{settings.supabase_url.rstrip('/')}/storage/v1/object/public/avatars/{user.id}/"
         if db.ready and not payload.avatar_url.startswith(expected_prefix):
@@ -471,6 +488,7 @@ async def update_me(payload: ProfileUpdateRequest, user: AuthUser = Depends(curr
         "display_name": payload.display_name.strip(),
         "city": payload.city.strip() if payload.city else None,
         "avatar_url": payload.avatar_url,
+        "timezone": payload.timezone,
         "updated_at": updated_at,
     }
     rows = await db.update("profiles", profile_payload, id=f"eq.{user.id}")
@@ -517,6 +535,10 @@ async def my_coach_profile(user: AuthUser = Depends(current_user)) -> dict[str, 
     if not rows:
         raise HTTPException(404, "Perfil profesional no encontrado")
     row = rows[0]
+    private_locations = await db.select("service_private_locations", service_id=f"in.({','.join(service['id'] for service in row.get('coach_services', []))})") if row.get("coach_services") else []
+    locations_by_service = {item["service_id"]: item for item in private_locations}
+    for service in row.get("coach_services", []):
+        service["private_location"] = locations_by_service.get(service["id"])
     row["presentation_video_url"] = (
         await storage_signed_url("coach-videos", row["video_path"], expires_in=3600)
         if row.get("video_path")
@@ -528,21 +550,46 @@ async def my_coach_profile(user: AuthUser = Depends(current_user)) -> dict[str, 
 @app.post("/api/v1/coach/services", tags=["coach"])
 async def create_service(payload: ServiceCreateRequest, user: AuthUser = Depends(current_user)) -> dict[str, Any]:
     service_data = payload.model_dump(mode="json")
+    private_location = {
+        "address_line": service_data.pop("private_address_line"),
+        "locality": service_data.pop("private_locality"),
+        "postal_code": service_data.pop("private_postal_code"),
+        "instructions": service_data.pop("private_location_instructions"),
+    }
     # Keep single sessions, flexible packs and legacy fixed series compatible
     # until the optional flexible-schedule migration is deployed remotely.
     if payload.recurring_schedule_mode == "fixed":
         service_data.pop("recurring_schedule_mode", None)
-    return await db.insert("coach_services", {"coach_id": user.id, **service_data})
+    service = await db.insert("coach_services", {"coach_id": user.id, **service_data})
+    if payload.location_policy == "fixed_private":
+        await db.upsert("service_private_locations", {"service_id": service["id"], **private_location}, "service_id")
+        service["private_location"] = {"service_id": service["id"], **private_location}
+    return service
 
 
 @app.get("/api/v1/coach/services", tags=["coach"])
 async def my_services(user: AuthUser = Depends(current_user)) -> list[dict[str, Any]]:
-    return await db.select("coach_services", coach_id=f"eq.{user.id}", active="eq.true", order="name.asc")
+    services = await db.select("coach_services", coach_id=f"eq.{user.id}", active="eq.true", order="name.asc")
+    service_ids = [service["id"] for service in services]
+    private_locations = await db.select(
+        "service_private_locations", service_id=f"in.({','.join(service_ids)})",
+    ) if service_ids else []
+    locations_by_service = {item["service_id"]: item for item in private_locations}
+    for service in services:
+        service["private_location"] = locations_by_service.get(service["id"])
+    return services
 
 
 @app.put("/api/v1/coach/services/{service_id}", tags=["coach"])
 async def update_service(service_id: str, payload: ServiceCreateRequest, user: AuthUser = Depends(current_user)) -> dict[str, Any]:
     service_data = payload.model_dump(mode="json")
+    private_location = {
+        "address_line": service_data.pop("private_address_line"),
+        "locality": service_data.pop("private_locality"),
+        "postal_code": service_data.pop("private_postal_code"),
+        "instructions": service_data.pop("private_location_instructions"),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
     if payload.recurring_schedule_mode == "fixed":
         service_data.pop("recurring_schedule_mode", None)
     rows = await db.update(
@@ -553,6 +600,11 @@ async def update_service(service_id: str, payload: ServiceCreateRequest, user: A
     )
     if not rows:
         raise HTTPException(404, "Servicio no encontrado")
+    if payload.location_policy == "fixed_private":
+        await db.upsert("service_private_locations", {"service_id": service_id, **private_location}, "service_id")
+        rows[0]["private_location"] = {"service_id": service_id, **private_location}
+    else:
+        await db.delete("service_private_locations", service_id=f"eq.{service_id}")
     return rows[0]
 
 
@@ -820,6 +872,12 @@ async def advance_training_lifecycle() -> dict[str, Any]:
                     if booking_request.get("series_id"):
                         await db.update("booking_series", {"status": "expired", "updated_at": now_iso}, id=f"eq.{booking_request['series_id']}")
                         await db.update("bookings", {"status": "cancelled", "updated_at": now_iso}, series_id=f"eq.{booking_request['series_id']}")
+                await publish_event(
+                    "booking.request_expired",
+                    "booking_request",
+                    booking_request["id"],
+                    f"booking.request_expired:{booking_request['id']}",
+                )
             await db.rpc("finish_lifecycle_job", {"p_job_id": job["id"], "p_error": None})
         except Exception as exc:
             logger.exception("No se pudo procesar el trabajo de ciclo de vida %s", job.get("id"))
@@ -831,7 +889,10 @@ async def advance_training_lifecycle() -> dict[str, Any]:
 async def run_lifecycle(x_cron_secret: str = Header(default="")) -> dict[str, Any]:
     if not settings.internal_cron_secret or x_cron_secret != settings.internal_cron_secret:
         raise HTTPException(401, "Credencial interna no válida")
-    return await advance_training_lifecycle()
+    lifecycle = await advance_training_lifecycle()
+    scheduled = await schedule_due_communications()
+    communication = await process_communication_queue()
+    return {"lifecycle": lifecycle, "scheduled": scheduled, "communication": communication}
 
 
 @app.post("/api/v1/packages/book", tags=["bookings"])
@@ -878,7 +939,12 @@ async def book_with_package(
         {"status": "reserved", "booking_id": booking["id"], "updated_at": datetime.now(timezone.utc).isoformat()},
         id=f"eq.{credits[0]['id']}", status="eq.available",
     )
-    background.add_task(provision_meeting, booking["id"])
+    if services_found[0].get("location_policy") == "fixed_private":
+        await snapshot_service_location(booking["id"], services_found[0]["id"], packages_found[0]["coach_id"])
+    await publish_event(
+        "booking.credit_reserved", "booking", booking["id"], f"booking.credit_reserved:{booking['id']}", actor_id=user.id,
+    )
+    background.add_task(process_communication_queue)
     return booking
 
 
@@ -895,12 +961,18 @@ async def bookings(
         if perspective == "coach"
         else {"or_": f"(consumer_id.eq.{user.id},coach_id.eq.{user.id})"}
     )
-    return await db.select(
+    rows = await db.select(
         "bookings",
-        select="*,coach_services(name,duration_minutes),coach_profiles(headline,profiles(display_name)),profiles(display_name),session_reports(id,author_id,outcome,circumstances,note),reviews(id,author_id,revealed_at)",
+        select="*,coach_services(name,duration_minutes,mode,location_policy,public_area_label),coach_profiles(headline,profiles(display_name)),profiles(display_name),session_reports(id,author_id,outcome,circumstances,note),reviews(id,author_id,revealed_at),booking_reschedule_requests(*)",
         **role_filter,
         order="starts_at.desc",
     )
+    confirmed_ids = [item["id"] for item in rows if item["status"] == "confirmed"]
+    locations = await db.select("booking_private_locations", booking_id=f"in.({','.join(confirmed_ids)})") if confirmed_ids else []
+    locations_by_booking = {item["booking_id"]: item for item in locations}
+    for item in rows:
+        item["private_location"] = locations_by_booking.get(item["id"])
+    return rows
 
 
 @app.post("/api/v1/bookings/{booking_id}/cancel", tags=["bookings"])
@@ -943,10 +1015,124 @@ async def cancel_booking(booking_id: str, payload: CancellationRequest, user: Au
                 await db.update("payments", {"status": "refunded", "stripe_refund_id": refund_id}, id=f"eq.{payments[0]['id']}")
     await db.update("bookings", {"status": "cancelled", "updated_at": datetime.now(timezone.utc).isoformat()}, id=f"eq.{booking_id}")
     cancellation = await db.insert("cancellations", {"booking_id": booking_id, "cancelled_by": user.id, "reason": payload.reason, "refund_cents": refund_cents})
-    recipient_id = booking["coach_id"] if booking["consumer_id"] == user.id else booking["consumer_id"]
-    await notify_user(recipient_id, "booking_cancelled", "Reserva cancelada", "La otra parte ha cancelado la sesión.", "/reservas")
+    await publish_event(
+        "booking.cancelled", "booking", booking_id, f"booking.cancelled:{booking_id}", actor_id=user.id,
+        payload={"credit_restored": bool(credits), "refund_id": refund_id},
+    )
+    await process_communication_queue()
     await advance_training_lifecycle()
     return {**cancellation, "credit_restored": bool(credits), "refund_id": refund_id}
+
+
+@app.put("/api/v1/bookings/{booking_id}/location", tags=["bookings"])
+async def confirm_booking_location(
+    booking_id: str,
+    payload: BookingLocationRequest,
+    background: BackgroundTasks,
+    user: AuthUser = Depends(current_user),
+) -> dict[str, Any]:
+    rows = await db.select("bookings", select="*,coach_services(mode)", id=f"eq.{booking_id}", coach_id=f"eq.{user.id}")
+    if not rows:
+        raise HTTPException(404, "Reserva no encontrada")
+    booking = rows[0]
+    if booking["status"] != "confirmed":
+        raise HTTPException(409, "La ubicación exacta solo se confirma en reservas confirmadas")
+    if (booking.get("coach_services") or {}).get("mode") == "online":
+        raise HTTPException(409, "Una sesión online no necesita ubicación física")
+    location = await db.upsert(
+        "booking_private_locations",
+        {
+            "booking_id": booking_id, "source": "coach_confirmed", "confirmed_by": user.id,
+            "updated_at": datetime.now(timezone.utc).isoformat(), **payload.model_dump(),
+        },
+        "booking_id",
+    )
+    await publish_event(
+        "booking.location_updated", "booking", booking_id,
+        f"booking.location_updated:{booking_id}:{location.get('updated_at') or location.get('confirmed_at')}", actor_id=user.id,
+    )
+    background.add_task(process_communication_queue)
+    return location
+
+
+@app.post("/api/v1/bookings/{booking_id}/reschedule-requests", tags=["bookings"])
+async def propose_booking_reschedule(
+    booking_id: str,
+    payload: BookingRescheduleCreateRequest,
+    background: BackgroundTasks,
+    user: AuthUser = Depends(current_user),
+) -> dict[str, Any]:
+    rows = await db.select("bookings", id=f"eq.{booking_id}")
+    if not rows or user.id not in {rows[0]["consumer_id"], rows[0]["coach_id"]}:
+        raise HTTPException(404, "Reserva no encontrada")
+    booking = rows[0]
+    now = datetime.now(timezone.utc)
+    original_start = datetime.fromisoformat(booking["starts_at"].replace("Z", "+00:00"))
+    proposed_start = payload.starts_at if payload.starts_at.tzinfo else payload.starts_at.replace(tzinfo=timezone.utc)
+    if booking["status"] != "confirmed" or min(original_start, proposed_start) <= now + timedelta(hours=24):
+        raise HTTPException(409, "Los cambios deben proponerse con al menos 24 horas de antelación")
+    services, coaches = await asyncio.gather(
+        db.select("coach_services", id=f"eq.{booking['service_id']}", active="eq.true"),
+        db.select("coach_profiles", user_id=f"eq.{booking['coach_id']}"),
+    )
+    if not services or not coaches:
+        raise HTTPException(409, "El servicio ya no está disponible")
+    validate_booking_schedule(services[0], coaches[0], [proposed_start])
+    proposed_end = proposed_start + timedelta(minutes=int(services[0]["duration_minutes"]))
+    expires_at = min(now + timedelta(hours=24), original_start - timedelta(hours=24), proposed_start - timedelta(hours=24))
+    request_row = await db.insert(
+        "booking_reschedule_requests",
+        {
+            "booking_id": booking_id, "proposed_by": user.id,
+            "proposed_starts_at": proposed_start.isoformat(), "proposed_ends_at": proposed_end.isoformat(),
+            "reason": payload.reason.strip(), "expires_at": expires_at.isoformat(),
+        },
+    )
+    await publish_event(
+        "booking.reschedule_proposed", "booking", booking_id,
+        f"booking.reschedule_proposed:{request_row['id']}", actor_id=user.id,
+        payload={"request_id": request_row["id"], "recipient_ids": [booking["coach_id"] if user.id == booking["consumer_id"] else booking["consumer_id"]]},
+    )
+    background.add_task(process_communication_queue)
+    return request_row
+
+
+@app.post("/api/v1/bookings/reschedule-requests/{request_id}/decision", tags=["bookings"])
+async def decide_booking_reschedule(
+    request_id: str,
+    payload: BookingRescheduleDecisionRequest,
+    background: BackgroundTasks,
+    user: AuthUser = Depends(current_user),
+) -> dict[str, Any]:
+    requests = await db.select("booking_reschedule_requests", id=f"eq.{request_id}")
+    if not requests or requests[0]["status"] != "pending":
+        raise HTTPException(409, "La propuesta ya no está pendiente")
+    request_row = requests[0]
+    bookings_found = await db.select("bookings", id=f"eq.{request_row['booking_id']}")
+    if not bookings_found:
+        raise HTTPException(404, "Reserva no encontrada")
+    booking = bookings_found[0]
+    if user.id not in {booking["consumer_id"], booking["coach_id"]} or user.id == request_row["proposed_by"]:
+        raise HTTPException(403, "No puedes decidir esta propuesta")
+    if payload.decision == "accept":
+        result = await db.rpc("accept_booking_reschedule", {"p_request_id": request_id, "p_user_id": user.id})
+        kind = "booking.reschedule_accepted"
+    else:
+        rows = await db.update(
+            "booking_reschedule_requests",
+            {"status": "rejected", "decided_by": user.id, "decided_at": datetime.now(timezone.utc).isoformat(), "updated_at": datetime.now(timezone.utc).isoformat()},
+            id=f"eq.{request_id}", status="eq.pending",
+        )
+        if not rows:
+            raise HTTPException(409, "La propuesta ya no está pendiente")
+        result = rows[0]
+        kind = "booking.reschedule_rejected"
+    await publish_event(
+        kind, "booking", booking["id"], f"{kind}:{request_id}", actor_id=user.id,
+        payload={"request_id": request_id, "recipient_ids": [booking["consumer_id"], booking["coach_id"]]},
+    )
+    background.add_task(process_communication_queue)
+    return result
 
 
 @app.post("/api/v1/bookings/{booking_id}/outcome", tags=["bookings"])
@@ -976,7 +1162,12 @@ async def report_booking_outcome(
         "booking_id,author_id",
     )
     recipient_id = booking["coach_id"] if user.id == booking["consumer_id"] else booking["consumer_id"]
-    await notify_user(recipient_id, "session_outcome", "Confirma cómo fue la sesión", "La otra parte ha registrado el resultado. Tienes 48 horas para responder.", "/reservas")
+    await publish_event(
+        "booking.outcome_required", "booking", booking_id,
+        f"booking.outcome_required:{booking_id}:{report['id']}", actor_id=user.id,
+        payload={"recipient_ids": [recipient_id]},
+    )
+    await process_communication_queue()
     await advance_training_lifecycle()
     return report
 
@@ -1137,10 +1328,13 @@ async def decide_booking_request(
             capture_payment_intent(intent_id, f"request-accept:{request_id}")
         await db.update("booking_requests", {"status": "accepted", "decided_at": now_iso, "reason_code": payload.reason_code}, id=f"eq.{request_id}")
         if payment:
-            await db.update("payments", {"status": "paid", "updated_at": now_iso}, id=f"eq.{payment['id']}")
+            await db.update("payments", {"status": "paid", "stripe_receipt_url": stripe_receipt_url(intent_id), "updated_at": now_iso}, id=f"eq.{payment['id']}")
         if booking_request.get("booking_id"):
             await db.update("bookings", {"status": "confirmed", "request_expires_at": None, "updated_at": now_iso}, id=f"eq.{booking_request['booking_id']}")
-            background.add_task(provision_meeting, booking_request["booking_id"])
+            await publish_event(
+                "booking.confirmed", "booking", booking_request["booking_id"],
+                f"booking.confirmed:request:{request_id}", actor_id=user.id,
+            )
         else:
             packages_found = await db.select("booking_packages", id=f"eq.{booking_request['package_id']}")
             if packages_found:
@@ -1151,8 +1345,13 @@ async def decide_booking_request(
                 await db.update("booking_series", {"status": "confirmed", "updated_at": now_iso}, id=f"eq.{booking_request['series_id']}")
                 series_bookings = await db.update("bookings", {"status": "confirmed", "updated_at": now_iso}, series_id=f"eq.{booking_request['series_id']}")
                 for item in series_bookings:
-                    background.add_task(provision_meeting, item["id"])
-        await notify_user(booking_request["consumer_id"], "request_accepted", "Solicitud aceptada", "El entrenador ha confirmado tu reserva.", "/reservas")
+                    await publish_event(
+                        "booking.confirmed", "booking", item["id"], f"booking.confirmed:request:{request_id}:{item['id']}", actor_id=user.id,
+                    )
+            await publish_event(
+                "package.activated", "package", booking_request["package_id"], f"package.activated:request:{request_id}", actor_id=user.id,
+            )
+        background.add_task(process_communication_queue)
     else:
         if intent_id:
             cancel_payment_intent(intent_id, f"request-reject:{request_id}")
@@ -1166,7 +1365,10 @@ async def decide_booking_request(
             if booking_request.get("series_id"):
                 await db.update("booking_series", {"status": "cancelled", "updated_at": now_iso}, id=f"eq.{booking_request['series_id']}")
                 await db.update("bookings", {"status": "cancelled", "updated_at": now_iso}, series_id=f"eq.{booking_request['series_id']}")
-        await notify_user(booking_request["consumer_id"], "request_rejected", "Solicitud no aceptada", "La autorización se ha liberado y los horarios vuelven a estar disponibles.", "/reservas")
+        await publish_event(
+            "booking.request_rejected", "booking_request", request_id, f"booking.request_rejected:{request_id}", actor_id=user.id,
+        )
+        background.add_task(process_communication_queue)
     return {"id": request_id, "status": "accepted" if payload.decision == "accept" else "rejected"}
 
 
@@ -1218,6 +1420,21 @@ async def messages(conversation_id: str, user: AuthUser = Depends(current_user))
     return list(reversed(rows))
 
 
+@app.post("/api/v1/conversations/{conversation_id}/read", tags=["chat"])
+async def mark_conversation_read(conversation_id: str, user: AuthUser = Depends(current_user)) -> dict[str, Any]:
+    await assert_participant(conversation_id, user.id)
+    latest = await db.select("messages", select="id,created_at", conversation_id=f"eq.{conversation_id}", order="created_at.desc", limit="1")
+    read_at = datetime.now(timezone.utc).isoformat()
+    return await db.upsert(
+        "conversation_read_states",
+        {
+            "conversation_id": conversation_id, "user_id": user.id, "last_read_at": read_at,
+            "last_read_message_id": latest[0]["id"] if latest else None, "updated_at": read_at,
+        },
+        "conversation_id,user_id",
+    )
+
+
 async def notify_message_recipient(
     recipient_id: str,
     kind: str,
@@ -1232,6 +1449,32 @@ async def notify_message_recipient(
         # Delivery is ancillary: the durable message must remain successful.
         detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
         logger.warning("Mensaje %s guardado, pero la notificación falló: %s", message_id, detail)
+
+
+async def schedule_chat_digest(
+    conversation_id: str,
+    recipient_id: str,
+    sender_name: str,
+    preview: str,
+    message_created_at: str,
+    message_id: str,
+) -> None:
+    """Keep delayed email scheduling outside the successful message path."""
+    try:
+        await publish_event(
+            "chat.digest",
+            "conversation",
+            conversation_id,
+            f"chat.digest:{conversation_id}:{recipient_id}:{message_id}",
+            payload={
+                "recipient_ids": [recipient_id], "conversation_id": conversation_id,
+                "sender_name": sender_name, "preview": preview, "message_count": 1,
+                "message_created_at": message_created_at,
+            },
+            available_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+        )
+    except Exception as exc:
+        logger.warning("No se pudo programar el resumen de la conversación %s: %s", conversation_id, exc)
 
 
 @app.post("/api/v1/conversations/{conversation_id}/messages", tags=["chat"])
@@ -1313,12 +1556,49 @@ async def send_message(
         f"/mensajes?conversation={conversation_id}",
         row["id"],
     )
+    background.add_task(
+        schedule_chat_digest,
+        conversation_id,
+        other_user_id,
+        sender_name,
+        preview,
+        row["created_at"],
+        row["id"],
+    )
     return row
 
 
 @app.get("/api/v1/notifications", tags=["notifications"])
 async def notifications(user: AuthUser = Depends(current_user)) -> list[dict[str, Any]]:
     return await db.select("notifications", user_id=f"eq.{user.id}", order="created_at.desc")
+
+
+@app.get("/api/v1/notification-preferences", tags=["notifications"])
+async def notification_preferences(user: AuthUser = Depends(current_user)) -> list[dict[str, Any]]:
+    existing = await db.select("notification_preferences", user_id=f"eq.{user.id}", order="category.asc")
+    existing_by_category = {item["category"]: item for item in existing}
+    result = []
+    for category in ("chat", "reminders", "reviews", "summaries"):
+        if category not in existing_by_category:
+            existing_by_category[category] = await db.upsert(
+                "notification_preferences",
+                {"user_id": user.id, "category": category, "email_enabled": True, "in_app_enabled": True},
+                "user_id,category",
+            )
+        result.append(existing_by_category[category])
+    return result
+
+
+@app.patch("/api/v1/notification-preferences", tags=["notifications"])
+async def update_notification_preference(
+    payload: NotificationPreferenceUpdateRequest,
+    user: AuthUser = Depends(current_user),
+) -> dict[str, Any]:
+    return await db.upsert(
+        "notification_preferences",
+        {"user_id": user.id, **payload.model_dump(), "updated_at": datetime.now(timezone.utc).isoformat()},
+        "user_id,category",
+    )
 
 
 @app.patch("/api/v1/notifications/{notification_id}/read", tags=["notifications"])
@@ -1421,6 +1701,45 @@ async def integration_url(provider: str, user: AuthUser = Depends(current_user))
     return OAuthUrlResponse(provider=provider, url=oauth_url(provider, user.id))
 
 
+@app.get("/api/v1/integrations", tags=["integrations"])
+async def my_integrations(user: AuthUser = Depends(current_user)) -> dict[str, Any]:
+    connections = await db.select(
+        "integration_connections", select="id,provider,expires_at,metadata,calendar_enabled,calendar_id,updated_at",
+        user_id=f"eq.{user.id}", order="provider.asc",
+    )
+    return {"providers": connections}
+
+
+@app.delete("/api/v1/integrations/{provider}", tags=["integrations"])
+async def disconnect_integration(provider: str, user: AuthUser = Depends(current_user)) -> dict[str, bool]:
+    if provider not in {"google", "zoom"}:
+        raise HTTPException(404, "Integración no disponible")
+    rows = await db.delete("integration_connections", user_id=f"eq.{user.id}", provider=f"eq.{provider}")
+    if not rows:
+        raise HTTPException(404, "Integración no conectada")
+    return {"disconnected": True}
+
+
+@app.patch("/api/v1/integrations/google/calendar", tags=["integrations"])
+async def update_google_calendar_preference(
+    payload: CalendarPreferenceUpdateRequest,
+    user: AuthUser = Depends(current_user),
+) -> dict[str, Any]:
+    rows = await db.update(
+        "integration_connections",
+        {
+            "calendar_enabled": payload.enabled,
+            "calendar_id": payload.calendar_id.strip(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        },
+        user_id=f"eq.{user.id}",
+        provider="eq.google",
+    )
+    if not rows:
+        raise HTTPException(404, "Conecta primero tu cuenta de Google")
+    return rows[0]
+
+
 @app.get("/api/v1/coach/integrations", tags=["integrations"])
 async def coach_integrations(user: AuthUser = Depends(current_user)) -> dict[str, Any]:
     coaches = await db.select("coach_profiles", user_id=f"eq.{user.id}")
@@ -1431,6 +1750,14 @@ async def coach_integrations(user: AuthUser = Depends(current_user)) -> dict[str
         "stripe_status": stripe_state["status"],
         "stripe_requirements_due": stripe_state["requirements_due"],
         "providers": [connection["provider"] for connection in connections],
+        "connections": [
+            {
+                "provider": connection["provider"],
+                "calendar_enabled": connection.get("calendar_enabled", False),
+                "calendar_id": connection.get("calendar_id", "primary"),
+            }
+            for connection in connections
+        ],
         "custom_video_url": coaches[0].get("custom_video_url") if coaches else None,
     }
 
@@ -1450,7 +1777,7 @@ async def custom_video_link(payload: CustomVideoLinkRequest, user: AuthUser = De
 @app.get("/api/v1/integrations/{provider}/callback", tags=["integrations"])
 async def integration_callback(provider: str, code: str = Query(...), state: str = Query(...)) -> RedirectResponse:
     await exchange_oauth_code(provider, code, state)
-    return RedirectResponse(f"{settings.frontend_url}/profesional?integration={provider}")
+    return RedirectResponse(f"{settings.frontend_url}/cuenta?integration={provider}")
 
 
 @app.post("/api/v1/stripe/connect", tags=["payments"])
@@ -1526,19 +1853,22 @@ async def stripe_webhook(request: Request, background: BackgroundTasks) -> dict[
                             {"status": "pending_payment", "request_expires_at": booking_request["expires_at"], "updated_at": now_iso},
                             series_id=f"eq.{booking_request['series_id']}",
                         )
-                await notify_user(booking_request["coach_id"], "booking_request", "Nueva solicitud de reserva", "Revisa la reputación del cliente y responde antes de 12 horas.", "/profesional?tab=requests")
+                await publish_event(
+                    "booking.request_submitted", "booking_request", request_id,
+                    f"booking.request_submitted:{request_id}", actor_id=booking_request["consumer_id"],
+                )
         elif booking_id:
             await db.update("bookings", {"status": "confirmed", "stripe_payment_intent_id": obj.get("payment_intent"), "updated_at": datetime.now(timezone.utc).isoformat()}, id=f"eq.{booking_id}")
-            await db.update("payments", {"status": "paid", "stripe_payment_intent_id": obj.get("payment_intent"), "updated_at": datetime.now(timezone.utc).isoformat()}, booking_id=f"eq.{booking_id}")
+            await db.update("payments", {"status": "paid", "stripe_payment_intent_id": obj.get("payment_intent"), "stripe_receipt_url": stripe_receipt_url(obj.get("payment_intent")), "updated_at": datetime.now(timezone.utc).isoformat()}, booking_id=f"eq.{booking_id}")
             bookings_found = await db.select("bookings", id=f"eq.{booking_id}")
             if bookings_found:
-                booking = bookings_found[0]
-                for recipient_id in {booking["consumer_id"], booking["coach_id"]}:
-                    await notify_user(recipient_id, "booking_confirmed", "Reserva confirmada", "El pago se ha completado correctamente.", "/reservas")
-            background.add_task(provision_meeting, booking_id)
+                await publish_event(
+                    "booking.confirmed", "booking", booking_id, f"booking.confirmed:stripe:{event_id}",
+                    actor_id=bookings_found[0]["consumer_id"], payload={"stripe_event_id": event_id},
+                )
         elif package_id:
             await db.update("booking_packages", {"status": "active"}, id=f"eq.{package_id}")
-            await db.update("payments", {"status": "paid", "stripe_payment_intent_id": obj.get("payment_intent"), "updated_at": datetime.now(timezone.utc).isoformat()}, package_id=f"eq.{package_id}")
+            await db.update("payments", {"status": "paid", "stripe_payment_intent_id": obj.get("payment_intent"), "stripe_receipt_url": stripe_receipt_url(obj.get("payment_intent")), "updated_at": datetime.now(timezone.utc).isoformat()}, package_id=f"eq.{package_id}")
             packages_found = await db.select("booking_packages", id=f"eq.{package_id}")
             if packages_found:
                 package = packages_found[0]
@@ -1548,10 +1878,16 @@ async def stripe_webhook(request: Request, background: BackgroundTasks) -> dict[
                         await db.update("booking_series", {"status": "confirmed", "updated_at": now_iso}, id=f"eq.{series_found[0]['id']}")
                         series_bookings = await db.update("bookings", {"status": "confirmed", "updated_at": now_iso}, series_id=f"eq.{series_found[0]['id']}")
                         for item in series_bookings:
-                            background.add_task(provision_meeting, item["id"])
+                            await publish_event(
+                                "booking.confirmed", "booking", item["id"], f"booking.confirmed:stripe:{event_id}:{item['id']}",
+                                actor_id=package["consumer_id"], payload={"stripe_event_id": event_id},
+                            )
                 else:
                     await ensure_package_credits(package)
-                await notify_user(packages_found[0]["consumer_id"], "package_activated", "Bono activado", "Ya puedes reservar tus sesiones.", "/reservas")
+                await publish_event(
+                    "package.activated", "package", package_id, f"package.activated:stripe:{event_id}",
+                    actor_id=package["consumer_id"], payload={"stripe_event_id": event_id},
+                )
     elif event["type"] == "checkout.session.expired":
         metadata = obj.get("metadata", {})
         booking_id = metadata.get("booking_id")
@@ -1571,12 +1907,69 @@ async def stripe_webhook(request: Request, background: BackgroundTasks) -> dict[
     elif event["type"] in {"charge.refunded", "refund.updated"}:
         payment_intent = obj.get("payment_intent")
         if payment_intent:
-            await db.update("payments", {"status": "refunded"}, stripe_payment_intent_id=f"eq.{payment_intent}")
+            changed_payments = await db.update("payments", {"status": "refunded"}, stripe_payment_intent_id=f"eq.{payment_intent}")
+            for payment in changed_payments:
+                if payment.get("booking_id"):
+                    await publish_event(
+                        "payment.refunded", "booking", payment["booking_id"], f"payment.refunded:{event_id}:{payment['id']}",
+                        payload={"stripe_event_id": event_id},
+                    )
     await db.update(
         "stripe_webhook_events",
         {"status": "processed", "processed_at": datetime.now(timezone.utc).isoformat()},
         id=f"eq.{event_id}",
     )
+    background.add_task(process_communication_queue)
+    return {"received": True}
+
+
+@app.post("/api/v1/webhooks/resend", tags=["notifications"])
+async def resend_webhook(request: Request) -> dict[str, bool]:
+    if not settings.resend_webhook_secret:
+        raise HTTPException(503, "Webhook de Resend no configurado")
+    body = await request.body()
+    webhook_id = request.headers.get("svix-id", "")
+    timestamp = request.headers.get("svix-timestamp", "")
+    signatures = request.headers.get("svix-signature", "")
+    try:
+        timestamp_value = int(timestamp)
+    except ValueError as exc:
+        raise HTTPException(400, "Firma de Resend no válida") from exc
+    if abs(datetime.now(timezone.utc).timestamp() - timestamp_value) > 300:
+        raise HTTPException(400, "Webhook de Resend caducado")
+    secret = settings.resend_webhook_secret.removeprefix("whsec_")
+    try:
+        secret_bytes = base64.b64decode(secret)
+    except (ValueError, binascii.Error) as exc:
+        raise HTTPException(503, "Secreto de webhook de Resend no válido") from exc
+    signed = webhook_id.encode() + b"." + timestamp.encode() + b"." + body
+    expected = base64.b64encode(hmac.new(secret_bytes, signed, hashlib.sha256).digest()).decode()
+    provided = [item.split(",", 1)[1] for item in signatures.split() if item.startswith("v1,")]
+    if not any(hmac.compare_digest(expected, item) for item in provided):
+        raise HTTPException(400, "Firma de Resend no válida")
+    if await db.select("resend_webhook_events", id=f"eq.{webhook_id}"):
+        return {"received": True}
+    try:
+        payload = json.loads(body)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, "Payload de Resend no válido") from exc
+    event_type = payload.get("type", "unknown")
+    await db.insert("resend_webhook_events", {"id": webhook_id, "event_type": event_type, "payload": payload})
+    email_id = (payload.get("data") or {}).get("email_id")
+    if email_id:
+        deliveries = await db.select("communication_deliveries", provider_message_id=f"eq.{email_id}")
+        if event_type == "email.delivered":
+            await db.update("communication_deliveries", {"status": "delivered", "updated_at": datetime.now(timezone.utc).isoformat()}, provider_message_id=f"eq.{email_id}")
+        elif event_type in {"email.bounced", "email.complained"}:
+            await db.update("communication_deliveries", {"status": "dead", "last_error": event_type, "updated_at": datetime.now(timezone.utc).isoformat()}, provider_message_id=f"eq.{email_id}")
+            for delivery in deliveries:
+                if delivery.get("user_id"):
+                    await db.upsert(
+                        "email_suppressions",
+                        {"user_id": delivery["user_id"], "reason": "complaint" if event_type == "email.complained" else "hard_bounce", "provider_event_id": webhook_id},
+                        "user_id",
+                    )
+    await db.update("resend_webhook_events", {"processed_at": datetime.now(timezone.utc).isoformat()}, id=f"eq.{webhook_id}")
     return {"received": True}
 
 
@@ -1639,6 +2032,12 @@ async def admin_review_video(
     if not rows:
         raise HTTPException(404, "Entrenador no encontrado")
     await db.insert("audit_logs", {"actor_id": user.id, "action": "coach.video.reviewed", "entity_type": "coach_profile", "entity_id": coach_id, "metadata": {"status": payload.status}})
+    await publish_event(
+        "coach.verification", "coach", coach_id,
+        f"coach.video:{coach_id}:{payload.status}:{datetime.now(timezone.utc).isoformat()}", actor_id=user.id,
+        payload={"recipient_ids": [coach_id], "body": payload.note or f"El vídeo ha quedado {payload.status}.", "action_url": "/profesional?tab=validation"},
+    )
+    await process_communication_queue()
     return rows[0]
 
 
@@ -1662,6 +2061,12 @@ async def verify_coach(coach_id: str, payload: VerificationRequest, user: AuthUs
             status="eq.pending",
         )
     await db.insert("audit_logs", {"actor_id": user.id, "action": "coach.verification.updated", "entity_type": "coach_profile", "entity_id": coach_id, "metadata": {"status": payload.status}})
+    await publish_event(
+        "coach.verification", "coach", coach_id,
+        f"coach.verification:{coach_id}:{payload.status}:{rows[0].get('updated_at')}", actor_id=user.id,
+        payload={"recipient_ids": [coach_id], "body": payload.note or f"Tu validación profesional ha cambiado a {payload.status}.", "action_url": "/profesional?tab=validation"},
+    )
+    await process_communication_queue()
     return rows[0]
 
 
@@ -1874,16 +2279,15 @@ async def admin_create_sanction(
         "entity_id": row["id"],
         "metadata": {"kind": payload.kind, "user_id": payload.user_id, "expires_at": expires_at.isoformat(), "report_id": payload.report_id},
     })
-    try:
-        await notify_user(
-            payload.user_id,
-            "moderation_sanction",
-            "Medida temporal aplicada",
-            f"CoachConnect ha restringido temporalmente {SANCTION_DETAILS_FOR_USER[payload.kind]} hasta el {expires_at.astimezone(ZoneInfo('Europe/Madrid')).strftime('%d/%m/%Y a las %H:%M')}.",
-            "/cuenta",
-        )
-    except Exception as exc:
-        logger.warning("La sanción %s se aplicó, pero la notificación falló: %s", row["id"], exc)
+    await publish_event(
+        "moderation.sanction", "moderation_sanction", row["id"], f"moderation.sanction:{row['id']}", actor_id=user.id,
+        payload={
+            "recipient_ids": [payload.user_id], "notify_operations": True,
+            "body": f"CoachConnect ha restringido temporalmente {SANCTION_DETAILS_FOR_USER[payload.kind]} hasta el {expires_at.astimezone(ZoneInfo('Europe/Madrid')).strftime('%d/%m/%Y a las %H:%M')}.",
+            "action_url": "/cuenta",
+        },
+    )
+    await process_communication_queue()
     return {**row, "profile": profiles[0]}
 
 
@@ -1995,8 +2399,12 @@ async def admin_resolve_session_dispute(
         "entity_id": booking_id,
         "metadata": {"outcome": payload.outcome, "note": payload.note, "credit_restored": restore_credit and bool(credits), "refund_id": refund_id},
     })
-    for recipient_id in {booking["consumer_id"], booking["coach_id"]}:
-        await notify_user(recipient_id, "session_dispute_resolved", "Incidencia resuelta", "Operaciones ha revisado y cerrado el resultado de la sesión.", "/reservas")
+    await publish_event(
+        "booking.dispute_resolved", "booking", booking_id,
+        f"booking.dispute_resolved:{booking_id}:{now_iso}", actor_id=user.id,
+        payload={"notify_operations": True},
+    )
+    await process_communication_queue()
     await advance_training_lifecycle()
     return {**resolved[0], "credit_restored": restore_credit and bool(credits), "refund_id": refund_id}
 
