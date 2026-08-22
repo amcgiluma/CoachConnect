@@ -171,6 +171,19 @@ def refund_destination_payment(payment_intent_id: str, idempotency_key: str) -> 
         raise HTTPException(502, "Stripe no pudo procesar el reembolso") from exc
 
 
+def stripe_receipt_url(payment_intent_id: str | None) -> str | None:
+    if not payment_intent_id or not settings.stripe_secret_key:
+        return None
+    stripe.api_key = settings.stripe_secret_key
+    try:
+        intent = stripe.PaymentIntent.retrieve(payment_intent_id, expand=["latest_charge"])
+        charge = intent.get("latest_charge")
+        return charge.get("receipt_url") if isinstance(charge, dict) else None
+    except stripe.StripeError as exc:
+        logger.warning("No se pudo obtener el recibo de %s: %s", payment_intent_id, exc)
+        return None
+
+
 class SupabaseAdmin:
     def __init__(self) -> None:
         self.base = f"{settings.supabase_url.rstrip('/')}/rest/v1"
@@ -426,30 +439,40 @@ async def send_email(to: str | None, subject: str, html: str) -> bool:
 
 
 async def notify_user(user_id: str, kind: str, title: str, body: str, action_url: str = "") -> dict[str, Any]:
+    """Create an in-app notification only.
+
+    Transactional email and calendar work is handled by the durable
+    communications outbox. Keeping this helper channel-specific prevents a
+    chat message from silently becoming an immediate email.
+    """
     notification = await db.insert(
         "notifications",
         {"user_id": user_id, "kind": kind, "title": title, "body": body, "action_url": action_url},
     )
-    if settings.resend_api_key:
-        try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                response = await client.get(
-                    f"{settings.supabase_url.rstrip('/')}/auth/v1/admin/users/{user_id}",
-                    headers={
-                        "apikey": settings.supabase_secret_key,
-                        "Authorization": f"Bearer {settings.supabase_secret_key}",
-                    },
-                )
-            email = response.json().get("email") if response.status_code < 400 else None
-            recipient = settings.email_test_recipient if settings.environment == "development" and settings.email_test_recipient else email
-            await send_email(
-                recipient,
-                title,
-                f"<h2>{escape(title)}</h2><p>{escape(body)}</p><p><a href='{settings.frontend_url.rstrip('/')}{escape(action_url, quote=True)}'>Abrir CoachConnect</a></p>",
-            )
-        except (httpx.HTTPError, HTTPException) as exc:
-            logger.warning("No se pudo enviar la notificación por correo al usuario %s: %s", user_id, exc)
     return notification
+
+
+async def snapshot_service_location(booking_id: str, service_id: str, coach_id: str) -> dict[str, Any] | None:
+    """Copy a fixed private service location without exposing it to clients."""
+    locations = await db.select("service_private_locations", service_id=f"eq.{service_id}")
+    if not locations:
+        return None
+    source = locations[0]
+    return await db.upsert(
+        "booking_private_locations",
+        {
+            "booking_id": booking_id,
+            "source": "service_snapshot",
+            "address_line": source["address_line"],
+            "locality": source["locality"],
+            "postal_code": source.get("postal_code") or "",
+            "latitude": source.get("latitude"),
+            "longitude": source.get("longitude"),
+            "instructions": source.get("instructions") or "",
+            "confirmed_by": coach_id,
+        },
+        "booking_id",
+    )
 
 
 async def create_checkout(
@@ -494,6 +517,8 @@ async def create_checkout(
             "p_platform_fee_percent": fee_rate_bps / 100,
         },
     )
+    if service.get("location_policy") == "fixed_private":
+        await snapshot_service_location(booking["id"], service_id, service["coach_id"])
     request_row: dict[str, Any] | None = None
     if service.get("booking_mode") == "request":
         request_row = await db.insert(
@@ -629,6 +654,11 @@ async def create_package_checkout(
                 "p_meeting_provider": "meet",
             },
         )
+        if service.get("location_policy") == "fixed_private":
+            await asyncio.gather(*(
+                snapshot_service_location(booking_id, service_id, service["coach_id"])
+                for booking_id in series.get("booking_ids", [])
+            ))
         packages = await db.select("booking_packages", id=f"eq.{series['package_id']}")
         package = packages[0]
     else:
@@ -789,6 +819,7 @@ async def exchange_oauth_code(provider: str, code: str, state: str) -> str:
             "encrypted_refresh_token": encrypt_token(token.get("refresh_token")),
             "expires_at": expires_at.isoformat(),
             "metadata": {"scope": token.get("scope", "")},
+            "calendar_enabled": provider == "google",
             "updated_at": datetime.now(timezone.utc).isoformat(),
         },
         "user_id,provider",

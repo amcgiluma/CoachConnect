@@ -60,6 +60,7 @@ class ProfileUpdateRequest(BaseModel):
     display_name: str = Field(min_length=2, max_length=80)
     city: str | None = Field(default=None, min_length=2, max_length=80)
     avatar_url: str | None = Field(default=None, max_length=2048)
+    timezone: str = Field(default="Europe/Madrid", min_length=3, max_length=80)
 
 
 class CoachOnboardingRequest(BaseModel):
@@ -91,6 +92,12 @@ class ServiceCreateRequest(BaseModel):
     available_weekdays: list[int] = Field(default_factory=lambda: list(range(7)), min_length=1, max_length=7)
     available_start_time: str = "09:00"
     available_end_time: str = "19:00"
+    location_policy: Literal["fixed_private", "travel", "agreed"] = "agreed"
+    public_area_label: str | None = Field(default=None, max_length=120)
+    private_address_line: str | None = Field(default=None, max_length=240)
+    private_locality: str | None = Field(default=None, max_length=120)
+    private_postal_code: str = Field(default="", max_length=20)
+    private_location_instructions: str = Field(default="", max_length=1000)
 
     @model_validator(mode="after")
     def validate_offer(self):
@@ -112,6 +119,11 @@ class ServiceCreateRequest(BaseModel):
             raise ValueError("La antelación de una solicitud debe cubrir el plazo de respuesta")
         if self.recurring_schedule_mode not in {"fixed", "flexible"}:
             raise ValueError("Modo de fechas no válido")
+        if self.mode != ServiceMode.online and self.location_policy in {"fixed_private", "travel"} and not self.public_area_label:
+            raise ValueError("Indica la zona pública aproximada del servicio presencial")
+        if self.mode != ServiceMode.online and self.location_policy == "fixed_private":
+            if not self.private_address_line or not self.private_locality:
+                raise ValueError("La ubicación fija necesita dirección y localidad privadas")
         if self.offer_type == "single":
             if self.package_size != 1:
                 raise ValueError("Una sesión individual debe incluir una sesión")
@@ -285,6 +297,35 @@ class BookingDecisionRequest(BaseModel):
         if self.decision not in {"accept", "reject"}:
             raise ValueError("Decisión no válida")
         return self
+
+
+class BookingLocationRequest(BaseModel):
+    address_line: str = Field(min_length=3, max_length=240)
+    locality: str = Field(min_length=2, max_length=120)
+    postal_code: str = Field(default="", max_length=20)
+    latitude: float | None = Field(default=None, ge=-90, le=90)
+    longitude: float | None = Field(default=None, ge=-180, le=180)
+    instructions: str = Field(default="", max_length=1000)
+
+
+class BookingRescheduleCreateRequest(BaseModel):
+    starts_at: datetime
+    reason: str = Field(default="", max_length=500)
+
+
+class BookingRescheduleDecisionRequest(BaseModel):
+    decision: Literal["accept", "reject"]
+
+
+class NotificationPreferenceUpdateRequest(BaseModel):
+    category: Literal["reminders", "chat", "reviews", "summaries"]
+    email_enabled: bool
+    in_app_enabled: bool
+
+
+class CalendarPreferenceUpdateRequest(BaseModel):
+    enabled: bool
+    calendar_id: str = Field(default="primary", min_length=1, max_length=240)
 
 
 class ReviewReplyRequest(BaseModel):
