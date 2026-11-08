@@ -11,4 +11,3 @@ dependencies = [
   "cryptography==45.0.7",
   "tzdata==2025.2",
 ]
-

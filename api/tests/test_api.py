@@ -653,6 +653,7 @@ def test_supabase_admin_authenticates_database_calls_as_service_role(monkeypatch
 
 
 def test_supabase_admin_surfaces_postgrest_multiple_choice_as_an_error(monkeypatch) -> None:
+    monkeypatch.setattr(services_module.settings, "demo_mode", False)
     monkeypatch.setattr(services_module.settings, "supabase_url", "http://127.0.0.1:54321")
     monkeypatch.setattr(services_module.settings, "supabase_secret_key", "service-role-test-key")
 

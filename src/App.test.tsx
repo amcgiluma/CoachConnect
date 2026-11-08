@@ -5,12 +5,15 @@ import App, { AccountIdentity, AccountNavigation, BookingDetailsDialog, SessionC
 
 afterEach(() => {
   cleanup()
+  vi.useRealTimers()
   vi.restoreAllMocks()
   window.history.replaceState({}, '', '/')
 })
 
 describe('CoachConnect', () => {
   it('opens a complete booking detail from the session calendar', () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-08-11T12:00:00+02:00'))
     const booking = {
       id: 'booking-1', starts_at: '2026-08-18T16:00:00+02:00', ends_at: '2026-08-18T17:00:00+02:00', status: 'confirmed', amount_cents: 3500,
       video_url: 'https://meet.google.com/example', notes: 'Trabajaremos técnica de sentadilla.', profiles: { display_name: 'Ana Cliente' },

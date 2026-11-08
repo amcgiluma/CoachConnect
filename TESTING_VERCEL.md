@@ -2,6 +2,8 @@
 
 Proyecto: `coachconnect-testing`. Rama de publicación: `main`.
 
+URL estable: https://coachconnect-testing.vercel.app
+
 La configuración de `vercel.json` usa Vercel Services para publicar React/Vite
 y FastAPI en el mismo despliegue. `/api/*`, `/health`, `/docs` y `/openapi.json`
 llegan a FastAPI; las demás rutas llegan a la aplicación React, incluidas las
