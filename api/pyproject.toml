@@ -1,0 +1,14 @@
+[project]
+name = "coachconnect-api"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "fastapi==0.115.6",
+  "uvicorn[standard]==0.34.0",
+  "pydantic-settings==2.7.1",
+  "httpx==0.28.1",
+  "stripe==12.5.1",
+  "cryptography==45.0.7",
+  "tzdata==2025.2",
+]
+

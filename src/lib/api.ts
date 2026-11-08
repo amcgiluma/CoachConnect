@@ -1,6 +1,8 @@
 import { supabase } from './supabase'
 
-const configuredApiUrl = (import.meta.env.VITE_API_URL || 'http://localhost:8000').replace(/\/$/, '')
+const configuredApiUrl = (
+  import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://localhost:8000' : '')
+).replace(/\/$/, '')
 // API call sites use versioned paths. Accept legacy env values ending in /api/v1
 // without producing /api/v1/api/v1 URLs.
 const API_URL = configuredApiUrl.replace(/\/api\/v1$/, '')

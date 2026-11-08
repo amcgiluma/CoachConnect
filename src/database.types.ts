@@ -1683,7 +1683,6 @@ export type Database = {
           id: string
           idempotency_key: string | null
           package_id: string | null
-          client_reward_tier: string
           platform_fee_cents: number
           platform_fee_rate_bps: number
           status: string
@@ -1706,7 +1705,6 @@ export type Database = {
           id?: string
           idempotency_key?: string | null
           package_id?: string | null
-          client_reward_tier?: string
           platform_fee_cents: number
           platform_fee_rate_bps?: number
           status?: string
@@ -1729,7 +1727,6 @@ export type Database = {
           id?: string
           idempotency_key?: string | null
           package_id?: string | null
-          client_reward_tier?: string
           platform_fee_cents?: number
           platform_fee_rate_bps?: number
           status?: string
