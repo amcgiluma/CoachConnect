@@ -18,7 +18,14 @@ export function AuthModal({ onClose }: { onClose: () => void }) {
     if (!hasSupabase) return toast.error('Añade las variables VITE_SUPABASE_* para activar el acceso.')
     setBusy(true)
     const result = creating
-      ? await supabase.auth.signUp({ email, password, options: { data: { full_name: name, locale: 'es' } } })
+      ? await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          emailRedirectTo: window.location.origin,
+          data: { full_name: name, locale: 'es' },
+        },
+      })
       : await supabase.auth.signInWithPassword({ email, password })
     setBusy(false)
     if (result.error) return toast.error(result.error.message)

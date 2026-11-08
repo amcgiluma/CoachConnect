@@ -64,6 +64,17 @@ Mantén Stripe en modo de prueba para las pruebas con testers.
 3. Iniciar sesión con una cuenta de pruebas y comprobar `/api/v1/me`.
 4. Probar los recorridos que se vayan entregando al equipo.
 
+Para verificar el retorno real de Supabase sin una cuenta de Google ni enviar
+correos (requiere las variables públicas de Supabase en `.env` o en el entorno):
+
+```bash
+node scripts/check-auth-redirect.mjs https://coachconnect-testing.vercel.app
+```
+
+La comprobación inicia OAuth y simula una cancelación del proveedor con el
+estado emitido por Supabase. Falla si el callback vuelve a otro dominio, por
+ejemplo localhost. No sustituye la prueba de iniciar sesión con una cuenta real.
+
 Los cambios publicados en `main` generan nuevos despliegues cuando está
 habilitada la conexión Git de Vercel. Los cambios sin commit de tu equipo no
 se publican mediante esa conexión.
